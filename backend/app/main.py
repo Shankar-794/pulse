@@ -66,14 +66,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configure CORS (disallowing wildcard origin when credentials are enabled)
-cors_origins = [orig for orig in settings.BACKEND_CORS_ORIGINS if orig != "*"]
+# Configure CORS (environment-driven, production-safe, Bearer token compatible)
+cors_origins = [orig for orig in settings.BACKEND_CORS_ORIGINS if orig and orig != "*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
 )
 
 # Production error handling: Never leak tracebacks, SQL queries, or internal exceptions

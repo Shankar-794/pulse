@@ -19,6 +19,14 @@ router = APIRouter()
 
 
 
+def _to_iso(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, datetime):
+        return val.isoformat()
+    return str(val)
+
+
 def format_db_story(story: Dict[str, Any], saved_ids: Optional[Set[str]] = None) -> Dict[str, Any]:
     """
     Transforms a database Story cluster with linked articles and AI intelligence into full API StoryResponse.
@@ -26,13 +34,13 @@ def format_db_story(story: Dict[str, Any], saved_ids: Optional[Set[str]] = None)
     raw_articles = story.get("articles") or []
     formatted_articles = [
         {
-            "id": a["id"],
-            "story_id": story["id"],
+            "id": a.get("id"),
+            "story_id": story.get("id"),
             "title": a.get("title", ""),
             "description": a.get("description", ""),
             "url": a.get("url") or a.get("canonical_url", ""),
             "author": a.get("author"),
-            "published_at": a.get("published_at", ""),
+            "published_at": _to_iso(a.get("published_at")),
             "source_name": a.get("source_name", "News Source"),
             "source_domain": a.get("source_domain", ""),
             "reliability_score": 0.95
@@ -44,11 +52,11 @@ def format_db_story(story: Dict[str, Any], saved_ids: Optional[Set[str]] = None)
     source_count = max(len(source_names), story.get("source_count", 1))
 
     # Build timeline of reporting events (use persistent grounded story_events if available)
-    db_events = db_repository.get_story_events(story["id"])
+    db_events = db_repository.get_story_events(story["id"]) if story.get("id") else []
     if db_events:
         timeline = [
             {
-                "time": (e.get("occurred_at") or e.get("detected_at") or "")[:16].replace("T", " "),
+                "time": (_to_iso(e.get("occurred_at") or e.get("detected_at")) or "")[:16].replace("T", " "),
                 "title": e.get("title", ""),
                 "description": e.get("summary", ""),
                 "event_type": e.get("event_type", "UPDATE"),
@@ -56,11 +64,13 @@ def format_db_story(story: Dict[str, Any], saved_ids: Optional[Set[str]] = None)
             }
             for e in db_events
         ]
+    elif story.get("timeline"):
+        timeline = story["timeline"]
     else:
         timeline = []
-        for a in sorted(raw_articles, key=lambda x: x.get("published_at", "")):
-            pub = a.get("published_at", "")
-            time_label = pub[:16].replace("T", " ") if pub else "Recent"
+        for a in sorted(raw_articles, key=lambda x: _to_iso(x.get("published_at"))):
+            pub_str = _to_iso(a.get("published_at"))
+            time_label = pub_str[:16].replace("T", " ") if pub_str else "Recent"
             timeline.append({
                 "time": time_label,
                 "title": f"Reported by {a.get('source_name', 'Wire')}",
@@ -151,12 +161,12 @@ def format_db_story(story: Dict[str, Any], saved_ids: Optional[Set[str]] = None)
         "breaking_score": breaking_score,
         "breaking_level": breaking_level,
         "latest_development": latest_dev,
-        "latest_updated_at": latest_up,
+        "latest_updated_at": _to_iso(latest_up) if latest_up else None,
         "update_count": update_cnt,
         "perspectives": perspectives,
         "evolution_version": story.get("evolution_version") or "v1",
-        "created_at": story.get("created_at") or datetime.utcnow().isoformat(),
-        "updated_at": story.get("updated_at"),
+        "created_at": _to_iso(story.get("created_at")) or datetime.utcnow().isoformat(),
+        "updated_at": _to_iso(story.get("updated_at")) if story.get("updated_at") else None,
         "timeline": timeline,
         "entities": entities,
         "claims": story.get("claims") or [],
@@ -174,7 +184,7 @@ def article_to_story(art: Dict[str, Any], saved_ids: Optional[Set[str]] = None) 
     source_name = art.get("source_name", "News Source")
     title = art.get("title", "")
     summary = art.get("description", "")
-    published_at = art.get("published_at", datetime.utcnow().isoformat())
+    published_at = _to_iso(art.get("published_at")) or datetime.utcnow().isoformat()
 
     base_importance = 50
     lower_title = title.lower()

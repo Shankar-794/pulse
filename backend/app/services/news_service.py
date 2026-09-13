@@ -621,6 +621,8 @@ class NewsService:
         section: Optional[str] = None,
         search: Optional[str] = None,
         min_importance: Optional[int] = None,
+        limit: Optional[int] = None,
+        offset: int = 0
     ) -> List[Dict[str, Any]]:
         results = []
         for s in self._stories:
@@ -660,6 +662,10 @@ class NewsService:
 
         # Sort by importance and freshness
         results.sort(key=lambda x: (x.get("importance_score", 0) * 0.6 + x.get("freshness_score", 0) * 0.4), reverse=True)
+        if offset > 0:
+            results = results[offset:]
+        if limit is not None:
+            results = results[:limit]
         return results
 
     get_stories = get_all_stories

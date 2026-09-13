@@ -54,8 +54,11 @@ class FeedRankingService:
             return 80
 
         try:
-            dt_clean = pub_str.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(dt_clean)
+            if isinstance(pub_str, datetime):
+                dt = pub_str
+            else:
+                dt_clean = str(pub_str).replace("Z", "+00:00")
+                dt = datetime.fromisoformat(dt_clean)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)

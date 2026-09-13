@@ -2,25 +2,71 @@ import os
 from typing import List, Union, Optional, Dict
 
 
-def _parse_cors_origins() -> List[str]:
-    cors_env = os.getenv("BACKEND_CORS_ORIGINS")
-    if cors_env:
-        cors_str = cors_env.strip()
-        if cors_str.startswith("["):
+PRODUCTION_FRONTEND_ORIGIN = "https://pulse-drab-eight.vercel.app"
+DEFAULT_LOCAL_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
+
+
+def _parse_cors_origins(cors_input: Optional[Union[str, List[str]]] = None) -> List[str]:
+    """
+    Robust CORS origins parser supporting:
+    - JSON array strings: '["https://pulse-drab-eight.vercel.app"]'
+    - Single-quoted pseudo-JSON: "['https://pulse-drab-eight.vercel.app']"
+    - Comma-separated strings: "https://pulse-drab-eight.vercel.app, http://localhost:5173"
+    - Raw Python list of strings
+    - Automatically strips trailing slashes, surrounding quotes, and whitespace.
+    - Disallows wildcard '*' while guaranteeing production frontend and local dev origins.
+    """
+    if cors_input is None:
+        cors_input = os.getenv("BACKEND_CORS_ORIGINS")
+
+    raw_items: List[str] = []
+
+    if isinstance(cors_input, (list, tuple, set)):
+        raw_items = [str(x) for x in cors_input]
+    elif isinstance(cors_input, str):
+        s = cors_input.strip()
+        # Strip outer quotes if the entire string was quoted
+        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+            s = s[1:-1].strip()
+
+        if s.startswith("[") and s.endswith("]"):
             import json
             try:
-                parsed = json.loads(cors_str)
+                parsed = json.loads(s)
                 if isinstance(parsed, list):
-                    return [str(o).strip() for o in parsed if str(o).strip() and str(o).strip() != "*"]
+                    raw_items = [str(x) for x in parsed]
+                else:
+                    raw_items = [str(parsed)]
             except Exception:
-                pass
-        return [o.strip() for o in cors_str.split(",") if o.strip() and o.strip() != "*"]
-    return [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-    ]
+                # Handle single-quoted list like ['https://...']
+                inner = s[1:-1].strip()
+                raw_items = inner.split(",")
+        elif s:
+            raw_items = s.split(",")
+    else:
+        raw_items = []
+
+    cleaned_origins: List[str] = []
+    for item in raw_items:
+        clean = str(item).strip().strip("'\"").rstrip("/")
+        if clean and clean != "*" and clean not in cleaned_origins:
+            cleaned_origins.append(clean)
+
+    # Always ensure the production frontend origin is allowed
+    if PRODUCTION_FRONTEND_ORIGIN not in cleaned_origins:
+        cleaned_origins.append(PRODUCTION_FRONTEND_ORIGIN)
+
+    # Ensure local dev origins are available
+    for loc in DEFAULT_LOCAL_ORIGINS:
+        if loc not in cleaned_origins:
+            cleaned_origins.append(loc)
+
+    return cleaned_origins
 
 
 def _is_debug_enabled() -> bool:
@@ -31,6 +77,8 @@ def _is_debug_enabled() -> bool:
 
 try:
     from pydantic_settings import BaseSettings
+    from pydantic import field_validator
+
     class Settings(BaseSettings):
         PROJECT_NAME: str = "Pulse Personal News Intelligence"
         API_V1_STR: str = "/api"
@@ -39,6 +87,11 @@ try:
         
         # CORS
         BACKEND_CORS_ORIGINS: List[str] = _parse_cors_origins()
+
+        @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+        @classmethod
+        def assemble_cors_origins(cls, v: Any) -> List[str]:
+            return _parse_cors_origins(v)
         
         # PostgreSQL Connection Config
         DATABASE_URL: str = os.getenv(
@@ -202,8 +255,8 @@ try:
 
         # Authentication & Google OAuth Configuration
         GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
-        GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
-        GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/callback")
+        _default_redirect = "https://pulse-drab-eight.vercel.app/auth/callback" if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:5173/auth/callback"
+        GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", _default_redirect)
         AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "pulse-production-session-secret-key-replace-in-env-at-launch")
         AUTH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("AUTH_TOKEN_EXPIRE_DAYS", "7"))
 
@@ -375,8 +428,8 @@ except Exception:
 
         # Authentication & Google OAuth Configuration
         GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
-        GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
-        GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/callback")
+        _default_redirect = "https://pulse-drab-eight.vercel.app/auth/callback" if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:5173/auth/callback"
+        GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", _default_redirect)
         AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "pulse-production-session-secret-key-replace-in-env-at-launch")
         AUTH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("AUTH_TOKEN_EXPIRE_DAYS", "7"))
 
