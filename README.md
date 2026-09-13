@@ -327,4 +327,70 @@ curl -X POST http://127.0.0.1:8000/api/pipeline/scheduler/config \
   }
   ```
 
+---
 
+## Docker Production Deployment
+
+Pulse backend is packaged as a production-grade container using Python 3.12, dynamic `$PORT` binding for cloud hosting platforms (such as Render), an unprivileged user `pulse`, and continuous health checking.
+
+### 1. Build the Docker Image
+Run from the repository root:
+```bash
+docker build -t pulse-backend .
+```
+
+### 2. Run Locally
+Run the container locally on port `8000`:
+```bash
+docker run --rm -p 8000:8000 \
+  -e ENVIRONMENT=production \
+  -e PORT=8000 \
+  -e AUTH_SECRET_KEY=your-secure-random-secret \
+  pulse-backend
+```
+
+Or using Docker Compose with persistent SQLite volume:
+```bash
+docker compose up --build
+```
+
+### 3. Test Health & Readiness
+Verify the containerized API is running and healthy:
+```bash
+# Basic health check
+curl -f http://localhost:8000/api/health
+
+# Comprehensive system health check
+curl -f http://localhost:8000/api/system/health
+```
+
+### 4. Deploying to Render
+1. Create a new **Web Service** on [Render](https://render.com).
+2. Connect your Git repository.
+3. Configure the service:
+   - **Environment**: `Docker`
+   - **Dockerfile Path**: `./Dockerfile`
+   - **Docker Context**: `.`
+4. Render automatically supplies the dynamic `$PORT` environment variable; the container entrypoint dynamically binds uvicorn to `0.0.0.0:${PORT}`.
+5. (Optional) For persistent news storage between deployments, attach a **Persistent Disk** mounted at `/app/data` and set `SQLITE_DB_PATH=/app/data/pulse.db`.
+
+### 5. Render Runtime Environment Variables
+Configure the following in the Render dashboard (**Environment** tab):
+
+| Variable | Required | Example / Description |
+|---|---|---|
+| `ENVIRONMENT` | **Yes** | `production` (disables dev login endpoints and debug leaks) |
+| `BACKEND_CORS_ORIGINS` | **Yes** | `["https://your-pulse-app.vercel.app"]` (your Vercel frontend URL) |
+| `AUTH_SECRET_KEY` | **Yes** | 64+ char random string for signing JWT tokens |
+| `SQLITE_DB_PATH` | No | `/app/data/pulse.db` (when using Render Persistent Disk) |
+| `GOOGLE_CLIENT_ID` | Optional | Google OAuth 2.0 Web Client ID |
+| `GOOGLE_CLIENT_SECRET` | Optional | Google OAuth 2.0 Web Client Secret (never committed) |
+| `GOOGLE_REDIRECT_URI` | Optional | `https://your-pulse-app.vercel.app/auth/callback` |
+| `LLM_API_KEY` | Optional | Gemini / OpenAI API key for AI story understanding |
+
+### 6. Frontend Deployment (Vercel)
+The React/Vite frontend is deployed separately on [Vercel](https://vercel.com):
+1. Import repository on Vercel with **Root Directory** set to `frontend`.
+2. Add environment variable:
+   - `VITE_API_BASE_URL`: `https://your-pulse-backend.onrender.com`
+3. Deploy.

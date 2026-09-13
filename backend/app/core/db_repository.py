@@ -48,7 +48,13 @@ class HardenedSQLiteConnection:
 
 class DbRepository:
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or str(DEFAULT_SQLITE_PATH)
+        configured_path = db_path or getattr(settings, "SQLITE_DB_PATH", None) or os.getenv("SQLITE_DB_PATH")
+        self.db_path = str(configured_path) if configured_path else str(DEFAULT_SQLITE_PATH)
+        if self.db_path != ":memory:" and not self.db_path.startswith("file:"):
+            try:
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"Could not create parent directory for SQLite DB {self.db_path}: {e}")
         self.init_db()
 
     def _create_raw_connection(self) -> sqlite3.Connection:

@@ -5,7 +5,12 @@
 import { MOCK_STORIES, MOCK_TOPICS, DEFAULT_USER_PREFERENCES } from '../data/mockNewsData';
 import { StorageService } from './storage';
 
-const API_BASE = '/api';
+const rawApiUrl = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim();
+const API_BASE = rawApiUrl
+  ? rawApiUrl.replace(/\/+$/, '').endsWith('/api')
+    ? rawApiUrl.replace(/\/+$/, '')
+    : `${rawApiUrl.replace(/\/+$/, '')}/api`
+  : '/api';
 
 export const getAuthHeaders = () => {
   const token = localStorage.getItem('pulse_auth_token');

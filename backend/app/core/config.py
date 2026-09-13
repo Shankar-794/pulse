@@ -48,6 +48,7 @@ try:
         USE_IN_MEMORY_STORE: bool = True
 
         # SQLite Concurrency & Hardening (Phase 9 Step 1)
+        SQLITE_DB_PATH: Optional[str] = os.getenv("SQLITE_DB_PATH", None)
         SQLITE_BUSY_TIMEOUT_MS: int = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000"))
         SQLITE_WAL_MODE: bool = os.getenv("SQLITE_WAL_MODE", "true").lower() in ("true", "1", "yes")
         SQLITE_SYNCHRONOUS: str = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")

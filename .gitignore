@@ -1,15 +1,21 @@
-# Environment
+# Environment & Secrets
 .env
-.env.local
-.venv
-venv/
-ENV/
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+.venv
+venv/
+ENV/
 .pytest_cache/
 .coverage
 htmlcov/
@@ -18,6 +24,7 @@ build/
 *.egg-info/
 
 # Node / Frontend
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
@@ -34,7 +41,11 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Database
+# Database & SQLite locks/WAL
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
