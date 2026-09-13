@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --news-canvas: #FBFBFA;
+    --news-surface: #FFFFFF;
+    --news-border: #E5E7EB;
+    --news-text-primary: #0F172A;
+    --news-text-secondary: #475569;
+    --news-text-muted: #94A3B8;
+    color-scheme: light;
+  }
+
+  .dark {
+    --news-canvas: #121316;
+    --news-surface: #18191E;
+    --news-border: #26282E;
+    --news-text-primary: #F8FAFC;
+    --news-text-secondary: #94A3B8;
+    --news-text-muted: #64748B;
+    color-scheme: dark;
+  }
+  
+  body {
+    background-color: var(--news-canvas);
+    color: var(--news-text-primary);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Clean minimalist scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.4);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 0.6);
+  }
+}
