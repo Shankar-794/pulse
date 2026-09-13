@@ -15,9 +15,9 @@ export const StorageService = {
   getSavedStoryIds: () => {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.SAVED_STORIES);
-      return data ? JSON.parse(data) : ['story-003', 'story-006'];
+      return data ? JSON.parse(data) : [];
     } catch {
-      return ['story-003', 'story-006'];
+      return [];
     }
   },
 

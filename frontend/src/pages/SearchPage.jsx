@@ -5,8 +5,8 @@ import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
 import NewsCard from '../components/feed/NewsCard';
 
-const CATEGORIES = ['All', 'AI', 'Technology', 'Cybersecurity', 'Space', 'Science', 'Business', 'World'];
-const SOURCES = ['All', 'Hacker News', 'Ars Technica', 'Krebs on Security', 'BleepingComputer', 'MIT News Research', 'NASA Breaking News', 'BBC Technology', 'The Verge'];
+const CATEGORIES = ['All', 'AI', 'Technology', 'Cybersecurity', 'Space', 'Science', 'Business', 'Economy', 'World'];
+const SOURCES = ['All', 'Hacker News', 'Ars Technica', 'Krebs on Security', 'BleepingComputer', 'MIT News Research', 'NASA Breaking News', 'BBC Technology', 'The Verge', 'BBC Business', 'NPR Economy'];
 const DATE_RANGES = [
   { label: 'Any Time', value: 'all' },
   { label: 'Past 24 Hours', value: '24h' },
@@ -76,12 +76,25 @@ export default function SearchPage() {
     };
   }, [query, selectedCategory, selectedSource, selectedDateRange]);
 
-  const handleSaveToggle = (storyId) => {
-    const isSaved = StorageService.toggleSaveStory(storyId);
-    ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
-    setResults((prev) =>
-      prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
-    );
+  const handleSaveToggle = async (storyId) => {
+    if (localStorage.getItem('pulse_auth_token')) {
+      const story = results.find((s) => s.id === storyId);
+      const willSave = !story?.is_saved;
+      if (willSave) {
+        await ApiService.saveStory(storyId);
+      } else {
+        await ApiService.unsaveStory(storyId);
+      }
+      setResults((prev) =>
+        prev.map((s) => (s.id === storyId ? { ...s, is_saved: willSave } : s))
+      );
+    } else {
+      const isSaved = StorageService.toggleSaveStory(storyId);
+      ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
+      setResults((prev) =>
+        prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
+      );
+    }
   };
 
   const handleResetFilters = () => {

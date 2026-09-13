@@ -1,20 +1,33 @@
 import React, { useState, useEffect } from 'react';
-import { Bookmark, Trash2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Bookmark, Trash2, Compass } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
+import { useAuth } from '../context/AuthContext';
 import NewsCard from '../components/feed/NewsCard';
 
 export default function SavedPage() {
   const [savedStories, setSavedStories] = useState([]);
   const [loading, setLoading] = useState(true);
+  const { user, isAuthenticated, refreshSavedCount } = useAuth();
 
   const loadSavedStories = async () => {
     setLoading(true);
-    const savedIds = new Set(StorageService.getSavedStoryIds());
-    const allStories = await ApiService.getStories();
-    const filtered = (allStories.items || []).filter((s) => savedIds.has(s.id));
-    setSavedStories(filtered);
-    setLoading(false);
+    try {
+      if (localStorage.getItem('pulse_auth_token')) {
+        const res = await ApiService.getSavedStories();
+        setSavedStories(res.items || []);
+      } else {
+        const savedIds = new Set(StorageService.getSavedStoryIds());
+        const allStories = await ApiService.getStories();
+        const filtered = (allStories.items || []).filter((s) => savedIds.has(s.id));
+        setSavedStories(filtered);
+      }
+    } catch {
+      setSavedStories([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -28,18 +41,30 @@ export default function SavedPage() {
     return () => {
       window.removeEventListener('pulse_saved_updated', handleSavedUpdated);
     };
-  }, []);
+  }, [isAuthenticated]);
 
-  const handleSaveToggle = (storyId) => {
-    StorageService.toggleSaveStory(storyId);
-    ApiService.recordInteraction(storyId, 'unsave');
+  const handleSaveToggle = async (storyId) => {
+    if (localStorage.getItem('pulse_auth_token')) {
+      await ApiService.unsaveStory(storyId);
+    } else {
+      StorageService.toggleSaveStory(storyId);
+      ApiService.recordInteraction(storyId, 'unsave');
+    }
     setSavedStories((prev) => prev.filter((s) => s.id !== storyId));
+    await refreshSavedCount();
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     if (window.confirm('Remove all saved stories from your library?')) {
-      savedStories.forEach((s) => StorageService.toggleSaveStory(s.id));
+      for (const s of savedStories) {
+        if (localStorage.getItem('pulse_auth_token')) {
+          await ApiService.unsaveStory(s.id);
+        } else {
+          StorageService.toggleSaveStory(s.id);
+        }
+      }
       setSavedStories([]);
+      await refreshSavedCount();
     }
   };
 
@@ -55,7 +80,9 @@ export default function SavedPage() {
             </h1>
           </div>
           <p className="text-sm text-news-text-secondary">
-            Your personal reading list. Saved stories are stored locally on your device.
+            {isAuthenticated && user
+              ? `Personal reading list for ${user.full_name || user.email}. Synced to your profile.`
+              : 'Your personal reading list. Saved stories are stored securely.'}
           </p>
         </div>
 
@@ -77,14 +104,25 @@ export default function SavedPage() {
           Loading your reading list...
         </div>
       ) : savedStories.length === 0 ? (
-        <div className="p-16 bg-news-surface border border-news-border rounded-xl text-center space-y-3 max-w-md mx-auto shadow-card">
+        <div className="p-16 bg-news-surface border border-news-border rounded-xl text-center space-y-4 max-w-md mx-auto shadow-card">
           <Bookmark className="w-10 h-10 text-slate-300 dark:text-neutral-600 mx-auto" />
-          <h3 className="text-lg font-bold text-news-text-primary">
-            No saved stories yet
-          </h3>
-          <p className="text-sm text-news-text-secondary leading-relaxed">
-            Click the bookmark icon on any story in your feed to save it for later reading.
-          </p>
+          <div>
+            <h3 className="text-lg font-bold text-news-text-primary">
+              You haven't saved any stories yet.
+            </h3>
+            <p className="text-sm text-news-text-secondary leading-relaxed mt-1">
+              Click the bookmark icon on any story in your feed to save it for later reading.
+            </p>
+          </div>
+          <div className="pt-2">
+            <Link
+              to="/for-you"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-sm transition-colors"
+            >
+              <Compass className="w-4 h-4" />
+              <span>Explore Your Feed</span>
+            </Link>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -101,3 +139,4 @@ export default function SavedPage() {
     </div>
   );
 }
+

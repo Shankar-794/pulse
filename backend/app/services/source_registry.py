@@ -104,6 +104,26 @@ DEFAULT_SOURCES = [
         primary_topic="Artificial Intelligence",
         reliability_score=0.90,
         enabled=True
+    ),
+    NewsSource(
+        id="bbcbusiness",
+        name="BBC Business",
+        base_url="https://www.bbc.com/news/business",
+        feed_url="https://feeds.bbci.co.uk/news/business/rss.xml",
+        category="business",
+        primary_topic="Business & Markets",
+        reliability_score=0.94,
+        enabled=True
+    ),
+    NewsSource(
+        id="nprbusiness",
+        name="NPR Economy",
+        base_url="https://www.npr.org/sections/business/",
+        feed_url="https://feeds.npr.org/1006/rss.xml",
+        category="economy",
+        primary_topic="Economy & Global Finance",
+        reliability_score=0.93,
+        enabled=True
     )
 ]
 

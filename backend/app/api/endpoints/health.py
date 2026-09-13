@@ -9,6 +9,7 @@ from typing import Dict, Any
 from backend.app.core.db_repository import db_repository
 from backend.app.services.ingestion_service import ingestion_service
 from backend.app.services.pulse_pipeline import pulse_pipeline
+from backend.app.services.pipeline_scheduler import pipeline_scheduler
 
 router = APIRouter()
 START_TIME = datetime.utcnow()
@@ -55,6 +56,7 @@ async def system_health() -> Dict[str, Any]:
     db_stats = db_repository.get_system_health_stats()
     last_pipeline = pulse_pipeline.get_last_run()
     last_ingestion = ingestion_service.get_last_summary()
+    failure_stats = db_repository.get_failure_stats()
 
     # Determine database health label
     db_status = "healthy" if db_stats.get("database_healthy") else "unhealthy"
@@ -68,6 +70,9 @@ async def system_health() -> Dict[str, Any]:
         "started_at": last_pipeline.get("started_at") if last_pipeline else None,
         "completed_at": last_pipeline.get("completed_at") if last_pipeline else None,
         "duration_seconds": last_pipeline.get("total_duration_seconds") if last_pipeline else 0.0,
+        "consecutive_failure_count": failure_stats["consecutive_failure_count"],
+        "last_failure_at": failure_stats["last_failure_at"],
+        "last_failure_message": failure_stats["last_failure_message"],
         "stages": {k: v.get("status") for k, v in last_pipeline.get("stages", {}).items()} if last_pipeline else {}
     }
 
@@ -85,6 +90,9 @@ async def system_health() -> Dict[str, Any]:
     return {
         "status": "healthy" if db_status == "healthy" else "degraded",
         "database_health": db_status,
+        "database_wal_mode": db_stats.get("wal_mode_active", False),
+        "database_journal_mode": db_stats.get("journal_mode", "unknown"),
+        "database_busy_timeout_ms": db_stats.get("busy_timeout_ms", 0),
         "timestamp": datetime.utcnow().isoformat(),
         "total_stories": db_stats.get("total_stories", 0),
         "analyzed_stories": db_stats.get("analyzed_stories", 0),
@@ -104,5 +112,6 @@ async def system_health() -> Dict[str, Any]:
             "failed_sources": last_ingestion.get("failed_sources", 0),
             "duration_seconds": last_ingestion.get("duration_seconds", 0.0)
         } if last_ingestion else None,
-        "pipeline": pipeline_info
+        "pipeline": pipeline_info,
+        "scheduler": pipeline_scheduler.get_status()
     }

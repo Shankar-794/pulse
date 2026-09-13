@@ -71,7 +71,7 @@ export default function TopicsPage() {
         {/* Filter Controls */}
         <div className="pt-4 border-t border-news-border flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-1.5 flex-wrap">
-            {['all', 'ai', 'technology', 'cybersecurity', 'space', 'science', 'business', 'world'].map((cat) => (
+            {['all', 'ai', 'technology', 'cybersecurity', 'space', 'science', 'business', 'economy', 'world'].map((cat) => (
               <button
                 key={cat}
                 type="button"

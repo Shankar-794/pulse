@@ -2,21 +2,43 @@ import os
 from typing import List, Union, Optional, Dict
 
 
+def _parse_cors_origins() -> List[str]:
+    cors_env = os.getenv("BACKEND_CORS_ORIGINS")
+    if cors_env:
+        cors_str = cors_env.strip()
+        if cors_str.startswith("["):
+            import json
+            try:
+                parsed = json.loads(cors_str)
+                if isinstance(parsed, list):
+                    return [str(o).strip() for o in parsed if str(o).strip() and str(o).strip() != "*"]
+            except Exception:
+                pass
+        return [o.strip() for o in cors_str.split(",") if o.strip() and o.strip() != "*"]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000"
+    ]
+
+
+def _is_debug_enabled() -> bool:
+    env = os.getenv("ENVIRONMENT", "development").lower()
+    default_debug = "false" if env == "production" else "true"
+    return os.getenv("DEBUG", default_debug).lower() in ("true", "1", "yes")
+
+
 try:
     from pydantic_settings import BaseSettings
     class Settings(BaseSettings):
         PROJECT_NAME: str = "Pulse Personal News Intelligence"
         API_V1_STR: str = "/api"
-        ENVIRONMENT: str = "development"
-        DEBUG: bool = True
+        ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+        DEBUG: bool = _is_debug_enabled()
         
         # CORS
-        BACKEND_CORS_ORIGINS: List[str] = [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:3000",
-            "http://127.0.0.1:3000"
-        ]
+        BACKEND_CORS_ORIGINS: List[str] = _parse_cors_origins()
         
         # PostgreSQL Connection Config
         DATABASE_URL: str = os.getenv(
@@ -24,6 +46,11 @@ try:
             "postgresql+asyncpg://pulse_user:pulse_password@localhost:5432/pulse_intelligence"
         )
         USE_IN_MEMORY_STORE: bool = True
+
+        # SQLite Concurrency & Hardening (Phase 9 Step 1)
+        SQLITE_BUSY_TIMEOUT_MS: int = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000"))
+        SQLITE_WAL_MODE: bool = os.getenv("SQLITE_WAL_MODE", "true").lower() in ("true", "1", "yes")
+        SQLITE_SYNCHRONOUS: str = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")
         
         # Intelligence Pipeline Defaults
         BREAKING_NEWS_IMPORTANCE_THRESHOLD: int = 85
@@ -34,7 +61,9 @@ try:
             "Cybersecurity",
             "Semiconductors",
             "Space",
-            "Science"
+            "Science",
+            "Business",
+            "Economy"
         ]
 
         # Semantic Clustering Configuration (Phase 3 & 3B)
@@ -43,12 +72,14 @@ try:
         CLUSTER_LEXICAL_WEIGHT: float = 0.65
         CLUSTER_ENTITY_WEIGHT: float = 0.35
         CATEGORY_RELATIONSHIPS: dict = {
-            "technology": ["ai", "cybersecurity", "software engineering", "semiconductors", "science", "space", "world"],
-            "ai": ["technology", "software engineering", "science", "world"],
-            "cybersecurity": ["technology", "software engineering", "world"],
+            "technology": ["ai", "cybersecurity", "software engineering", "semiconductors", "science", "space", "world", "business"],
+            "ai": ["technology", "software engineering", "science", "world", "business"],
+            "cybersecurity": ["technology", "software engineering", "world", "business"],
             "space": ["science", "technology"],
             "science": ["space", "technology", "ai"],
-            "world": ["technology", "ai", "cybersecurity", "general"]
+            "world": ["technology", "ai", "cybersecurity", "business", "economy", "general"],
+            "business": ["economy", "technology", "world", "ai"],
+            "economy": ["business", "world", "technology"]
         }
         # AI Story Understanding Configuration (Phase 4)
 
@@ -159,6 +190,22 @@ try:
             "all clear", "settlement reached", "verdict reached", "fix deployed", "mitigated"
         ]
 
+        # Automatic Pipeline Scheduler Configuration (Phase 8.2 Step 3)
+        SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "true").lower() in ("true", "1", "yes")
+        SCHEDULER_INTERVAL_MINUTES: int = int(os.getenv("SCHEDULER_INTERVAL_MINUTES", "30"))
+
+        # Stale Pipeline Run Detection & Resilience Configuration (Phase 9.1 Step 4)
+        PIPELINE_STALE_TIMEOUT_SECONDS: int = int(os.getenv("PIPELINE_STALE_TIMEOUT_SECONDS", "600"))
+        PIPELINE_STALE_QUEUE_TIMEOUT_SECONDS: int = int(os.getenv("PIPELINE_STALE_QUEUE_TIMEOUT_SECONDS", "300"))
+        PIPELINE_STALE_CHECK_INTERVAL_SECONDS: int = int(os.getenv("PIPELINE_STALE_CHECK_INTERVAL_SECONDS", "60"))
+
+        # Authentication & Google OAuth Configuration
+        GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
+        GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
+        GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/callback")
+        AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "pulse-production-session-secret-key-replace-in-env-at-launch")
+        AUTH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("AUTH_TOKEN_EXPIRE_DAYS", "7"))
+
         class Config:
             env_file = ".env"
             case_sensitive = True
@@ -172,18 +219,16 @@ except Exception:
         PROJECT_NAME: str = "Pulse Personal News Intelligence"
         API_V1_STR: str = "/api"
         ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
-        DEBUG: bool = True
-        BACKEND_CORS_ORIGINS: List[str] = [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:3000",
-            "http://127.0.0.1:3000"
-        ]
+        DEBUG: bool = _is_debug_enabled()
+        BACKEND_CORS_ORIGINS: List[str] = _parse_cors_origins()
         DATABASE_URL: str = os.getenv(
             "DATABASE_URL",
             "postgresql+asyncpg://pulse_user:pulse_password@localhost:5432/pulse_intelligence"
         )
         USE_IN_MEMORY_STORE: bool = True
+        SQLITE_BUSY_TIMEOUT_MS: int = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000"))
+        SQLITE_WAL_MODE: bool = os.getenv("SQLITE_WAL_MODE", "true").lower() in ("true", "1", "yes")
+        SQLITE_SYNCHRONOUS: str = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")
         BREAKING_NEWS_IMPORTANCE_THRESHOLD: int = 85
         DEFAULT_IMPORTANCE_FILTER: int = 50
         DEFAULT_USER_INTERESTS: List[str] = [
@@ -192,19 +237,23 @@ except Exception:
             "Cybersecurity",
             "Semiconductors",
             "Space",
-            "Science"
+            "Science",
+            "Business",
+            "Economy"
         ]
         CLUSTER_SIMILARITY_THRESHOLD: float = 0.32
         CLUSTER_TIME_WINDOW_HOURS: int = 72
         CLUSTER_LEXICAL_WEIGHT: float = 0.65
         CLUSTER_ENTITY_WEIGHT: float = 0.35
         CATEGORY_RELATIONSHIPS: dict = {
-            "technology": ["ai", "cybersecurity", "software engineering", "semiconductors", "science", "space", "world"],
-            "ai": ["technology", "software engineering", "science", "world"],
-            "cybersecurity": ["technology", "software engineering", "world"],
+            "technology": ["ai", "cybersecurity", "software engineering", "semiconductors", "science", "space", "world", "business"],
+            "ai": ["technology", "software engineering", "science", "world", "business"],
+            "cybersecurity": ["technology", "software engineering", "world", "business"],
             "space": ["science", "technology"],
             "science": ["space", "technology", "ai"],
-            "world": ["technology", "ai", "cybersecurity", "general"]
+            "world": ["technology", "ai", "cybersecurity", "business", "economy", "general"],
+            "business": ["economy", "technology", "world", "ai"],
+            "economy": ["business", "world", "technology"]
         }
         LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "auto")
         LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY", os.getenv("GEMINI_API_KEY", os.getenv("OPENAI_API_KEY", None)))
@@ -313,6 +362,22 @@ except Exception:
             "resolved", "patch released", "service restored", "containment achieved",
             "all clear", "settlement reached", "verdict reached", "fix deployed", "mitigated"
         ]
+
+        # Automatic Pipeline Scheduler Configuration (Phase 8.2 Step 3)
+        SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "true").lower() in ("true", "1", "yes")
+        SCHEDULER_INTERVAL_MINUTES: int = int(os.getenv("SCHEDULER_INTERVAL_MINUTES", "30"))
+
+        # Stale Pipeline Run Detection & Resilience Configuration (Phase 9.1 Step 4)
+        PIPELINE_STALE_TIMEOUT_SECONDS: int = int(os.getenv("PIPELINE_STALE_TIMEOUT_SECONDS", "600"))
+        PIPELINE_STALE_QUEUE_TIMEOUT_SECONDS: int = int(os.getenv("PIPELINE_STALE_QUEUE_TIMEOUT_SECONDS", "300"))
+        PIPELINE_STALE_CHECK_INTERVAL_SECONDS: int = int(os.getenv("PIPELINE_STALE_CHECK_INTERVAL_SECONDS", "60"))
+
+        # Authentication & Google OAuth Configuration
+        GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
+        GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
+        GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/callback")
+        AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "pulse-production-session-secret-key-replace-in-env-at-launch")
+        AUTH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("AUTH_TOKEN_EXPIRE_DAYS", "7"))
 
     settings = Settings()
 

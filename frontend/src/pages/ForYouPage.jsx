@@ -4,16 +4,19 @@ import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
 import NewsCard from '../components/feed/NewsCard';
 import FeedSection from '../components/feed/FeedSection';
+import ErrorState from '../components/common/ErrorState';
 
 export default function ForYouPage() {
   const [stories, setStories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [isEmpty, setIsEmpty] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const [syncMessage, setSyncMessage] = useState(null);
 
   const loadFeed = async () => {
     setLoading(true);
+    setHasError(false);
     try {
       const data = await ApiService.getFeed();
       if (data.is_empty) {
@@ -24,7 +27,7 @@ export default function ForYouPage() {
         setStories(data.items || []);
       }
     } catch {
-      setIsEmpty(false);
+      setHasError(true);
     } finally {
       setLoading(false);
     }
@@ -53,9 +56,25 @@ export default function ForYouPage() {
     };
   }, []);
 
-  const handleSaveToggle = (storyId) => {
-    const isSaved = StorageService.toggleSaveStory(storyId);
-    ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
+  const handleSaveToggle = async (storyId) => {
+    if (localStorage.getItem('pulse_auth_token')) {
+      const story = stories.find((s) => s.id === storyId);
+      const willSave = !story?.is_saved;
+      if (willSave) {
+        await ApiService.saveStory(storyId);
+      } else {
+        await ApiService.unsaveStory(storyId);
+      }
+      setStories((prev) =>
+        prev.map((s) => (s.id === storyId ? { ...s, is_saved: willSave } : s))
+      );
+    } else {
+      const isSaved = StorageService.toggleSaveStory(storyId);
+      ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
+      setStories((prev) =>
+        prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
+      );
+    }
   };
 
   const handleHide = (storyId) => {
@@ -75,7 +94,7 @@ export default function ForYouPage() {
     } catch {
       setSyncMessage({
         type: 'error',
-        text: 'Failed to update news feed. Check backend connection.'
+        text: 'Unable to update news feed. Please try again.'
       });
     } finally {
       setRefreshing(false);
@@ -147,6 +166,8 @@ export default function ForYouPage() {
         <div className="p-16 text-center text-sm text-news-text-secondary">
           Loading your news feed...
         </div>
+      ) : hasError ? (
+        <ErrorState onRetry={loadFeed} />
       ) : isEmpty ? (
         /* Clean Editorial Empty State */
         <div className="p-16 bg-news-surface border border-news-border rounded-xl text-center space-y-4 max-w-xl mx-auto shadow-card">

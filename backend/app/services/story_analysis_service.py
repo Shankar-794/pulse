@@ -322,7 +322,7 @@ Output ONLY a valid JSON object matching this exact schema:
     }}
   ],
   "why_it_matters": "string",
-  "category": "technology|ai|cybersecurity|space|science|world",
+  "category": "technology|ai|cybersecurity|space|science|world|business|economy",
   "entities": [
     {{"name": "string", "type": "organization|person|technology|product|location|event"}}
   ],

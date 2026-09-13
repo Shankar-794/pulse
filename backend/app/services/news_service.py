@@ -246,7 +246,7 @@ MOCK_STORIES = [
         "freshness_score": 90,
         "source_count": 11,
         "is_breaking": False,
-        "is_saved": True,
+        "is_saved": False,
         "relevance_reason": "High relevance to your Hardware Architecture and Semiconductor interests.",
         "tags": ["Semiconductors", "TSMC", "GAAFET", "Hardware", "Nanosheets", "2nm"],
         "created_at": NOW - timedelta(hours=4, minutes=10),
@@ -359,7 +359,7 @@ MOCK_STORIES = [
         "freshness_score": 88,
         "source_count": 10,
         "is_breaking": False,
-        "is_saved": True,
+        "is_saved": False,
         "relevance_reason": "High interest in energy storage materials science and clean tech engineering.",
         "tags": ["Science", "Batteries", "Solid-State", "Materials Engineering", "Energy"],
         "created_at": NOW - timedelta(hours=8, minutes=15),
@@ -536,6 +536,44 @@ MOCK_STORIES = [
                 "source_domain": "darkreading.com"
             }
         ]
+    },
+    {
+        "id": "story-011",
+        "title": "Global Semiconductor Capital Expenditure Hits Record High Amid Resilient Macroeconomic Demand",
+        "summary": "International trade monitors and central bank economic bulletins report that global semiconductor equipment outlays and compute infrastructure investments reached a new all-time high of $128 billion this fiscal year. The capital expenditure wave reflects macroeconomic reallocation from legacy hardware toward domestic wafer fabrication and next-generation packaging plants.",
+        "why_it_matters": "Demonstrates structural economic shifts as sovereign wealth funds and institutional capital treat microchip fabrication as vital critical infrastructure akin to national energy grids.",
+        "category": "economy",
+        "primary_topic": "Macroeconomics",
+        "importance_score": 83,
+        "relevance_score": 80,
+        "freshness_score": 85,
+        "source_count": 8,
+        "is_breaking": False,
+        "is_saved": False,
+        "relevance_reason": "Direct insight into macroeconomic capital expenditure cycles and technology market trends.",
+        "tags": ["Economy", "Semiconductors", "CapEx", "Global Trade", "Macroeconomics"],
+        "created_at": NOW - timedelta(hours=10),
+        "timeline": [
+            {"time": "08:00 UTC", "title": "Economic Report Published", "description": "Global Trade Monitor releases annual tech hardware capital analysis."},
+            {"time": "11:30 UTC", "title": "Central Bank Commentary", "description": "Monetary bulletin highlights industrial CapEx resilience."}
+        ],
+        "entities": [
+            {"name": "Federal Reserve", "category": "organization"},
+            {"name": "Bank for International Settlements", "category": "organization"},
+            {"name": "Global Semiconductor Alliance", "category": "organization"}
+        ],
+        "articles": [
+            {
+                "id": "art-1101",
+                "title": "Record Semiconductor Outlays Signal Sustained Macroeconomic Investment Shift",
+                "description": "How global capital expenditure is restructuring international tech manufacturing and logistics.",
+                "url": "https://example.com/economy/semiconductor-capex-record",
+                "author": "Stephanie Baker",
+                "published_at": NOW - timedelta(hours=9, minutes=30),
+                "source_name": "Financial Markets Wire",
+                "source_domain": "fmwire.com"
+            }
+        ]
     }
 ]
 
@@ -574,7 +612,7 @@ class NewsService:
         self._stories = list(MOCK_STORIES)
         self._topics = list(MOCK_TOPICS)
         self._preferences = dict(DEFAULT_PREFERENCES)
-        self._saved_ids = {"story-003", "story-006"}
+        self._saved_ids = set()
 
     def get_all_stories(
         self,

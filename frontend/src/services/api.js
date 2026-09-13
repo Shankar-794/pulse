@@ -7,6 +7,11 @@ import { StorageService } from './storage';
 
 const API_BASE = '/api';
 
+export const getAuthHeaders = () => {
+  const token = localStorage.getItem('pulse_auth_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+};
+
 export const ApiService = {
   /**
    * Check backend health and readiness
@@ -445,7 +450,17 @@ export const ApiService = {
       if (timeWindowHours) params.append('time_window_hours', timeWindowHours);
 
       const res = await fetch(`${API_BASE}/pipeline/run?${params.toString()}`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+          const data = await res.json();
+          if (data?.detail?.message) message = data.detail.message;
+          else if (typeof data?.detail === 'string') message = data.detail;
+        } catch (_) {}
+        const err = new Error(message);
+        err.status = res.status;
+        throw err;
+      }
       return await res.json();
     } catch (err) {
       console.error('Pipeline run failed:', err);
@@ -482,17 +497,329 @@ export const ApiService = {
   },
 
   /**
-   * Get recent pipeline runs history (Phase 8.2)
+   * Get recent pipeline runs history with optional filtering (Phase 8.2 Steps 1 & 4)
    */
-  getPipelineRuns: async (limit = 20) => {
+  getPipelineRuns: async (paramsOrLimit = 20) => {
     try {
-      const res = await fetch(`${API_BASE}/pipeline/runs?limit=${limit}`);
+      const params = new URLSearchParams();
+      if (typeof paramsOrLimit === 'number') {
+        params.append('limit', paramsOrLimit);
+      } else if (paramsOrLimit && typeof paramsOrLimit === 'object') {
+        const { limit = 20, status, triggerType } = paramsOrLimit;
+        if (limit) params.append('limit', limit);
+        if (status) params.append('status', status);
+        if (triggerType) params.append('trigger_type', triggerType);
+      }
+
+      const res = await fetch(`${API_BASE}/pipeline/runs?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
       console.error('Get pipeline runs failed:', err);
       return [];
     }
+  },
+
+  /**
+   * Get complete execution details for a specific pipeline run (Phase 8.2 Step 4)
+   */
+  getPipelineRun: async (runId) => {
+    try {
+      const res = await fetch(`${API_BASE}/pipeline/runs/${encodeURIComponent(runId)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error(`Get pipeline run ${runId} failed:`, err);
+      throw err;
+    }
+  },
+
+  /**
+   * Get automatic pipeline scheduler operational status (Phase 8.2 Steps 3 & 4)
+   */
+  getSchedulerStatus: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/pipeline/scheduler`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error('Get scheduler status failed:', err);
+      return { status: 'error', error: err.message };
+    }
+  },
+
+  /**
+   * Start automatic pipeline scheduler (Phase 8.2 Step 4)
+   */
+  startScheduler: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/pipeline/scheduler/start`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error('Start scheduler failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Stop automatic pipeline scheduler (Phase 8.2 Step 4)
+   */
+  stopScheduler: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/pipeline/scheduler/stop`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error('Stop scheduler failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Pause automatic pipeline scheduler (Phase 8.2 Step 4)
+   */
+  pauseScheduler: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/pipeline/scheduler/pause`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error('Pause scheduler failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Resume automatic pipeline scheduler (Phase 8.2 Step 4)
+   */
+  resumeScheduler: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/pipeline/scheduler/resume`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error('Resume scheduler failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Update runtime scheduler configuration (Phase 8.2 Step 4)
+   */
+  configureScheduler: async ({ intervalMinutes, enabled } = {}) => {
+    try {
+      const payload = {};
+      if (intervalMinutes !== undefined) payload.interval_minutes = intervalMinutes;
+      if (enabled !== undefined) payload.enabled = enabled;
+
+      const res = await fetch(`${API_BASE}/pipeline/scheduler/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.error('Configure scheduler failed:', err);
+      throw err;
+    }
+  },
+
+  // =========================================================================
+  // Authentication & User Session Management
+  // =========================================================================
+
+  /**
+   * Get public auth configuration
+   */
+  getAuthConfig: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/config`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch {
+      return { google_configured: false, client_id: '', redirect_uri: '' };
+    }
+  },
+
+  /**
+   * Get Google OAuth login URL
+   */
+  getGoogleAuthUrl: async (redirectUri) => {
+    try {
+      const params = redirectUri ? `?redirect_uri=${encodeURIComponent(redirectUri)}` : '';
+      const res = await fetch(`${API_BASE}/auth/google/url${params}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${res.status}`);
+      }
+      return await res.json();
+    } catch (err) {
+      console.error('Failed to get Google Auth URL:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Complete Google OAuth callback
+   */
+  handleGoogleCallback: async (code, redirectUri) => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/google/callback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, redirect_uri: redirectUri })
+      });
+      if (!res.ok) {
+        throw new Error('Unable to complete Google sign-in. Please try again.');
+      }
+      localStorage.removeItem('pulse_saved_story_ids');
+      return await res.json();
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  /**
+   * Developer / offline login (development only)
+   */
+  devLogin: async ({ email, name, pictureUrl } = {}) => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/dev-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, name, picture_url: pictureUrl })
+      });
+      if (!res.ok) {
+        throw new Error('Unable to authenticate. Please try again.');
+      }
+      localStorage.removeItem('pulse_saved_story_ids');
+      return await res.json();
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  /**
+   * Fetch current authenticated user profile
+   */
+  getCurrentUser: async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/me`, {
+        headers: getAuthHeaders()
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.user || null;
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * Logout current session
+   */
+  logout: async () => {
+    try {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      localStorage.removeItem('pulse_auth_token');
+      localStorage.removeItem('pulse_user_profile');
+      localStorage.removeItem('pulse_saved_story_ids');
+      window.dispatchEvent(new CustomEvent('pulse_saved_updated', { detail: { count: 0 } }));
+    }
+  },
+
+  // =========================================================================
+  // Per-User Saved Stories Persistence
+  // =========================================================================
+
+  /**
+   * Retrieve stories saved by current user
+   */
+  getSavedStories: async () => {
+    const isAuthed = !!localStorage.getItem('pulse_auth_token');
+    if (isAuthed) {
+      try {
+        const res = await fetch(`${API_BASE}/stories/saved`, {
+          headers: getAuthHeaders()
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } catch {
+        return { total: 0, items: [] };
+      }
+    }
+    // Unauthenticated: only return locally saved stories if any exist
+    try {
+      const savedIds = new Set(StorageService.getSavedStoryIds());
+      if (savedIds.size === 0) {
+        return { total: 0, items: [] };
+      }
+      const allStories = await ApiService.getStories();
+      const filtered = (allStories.items || []).filter(s => savedIds.has(s.id)).map(s => ({
+        ...s,
+        is_saved: true
+      }));
+      return { total: filtered.length, items: filtered };
+    } catch {
+      return { total: 0, items: [] };
+    }
+  },
+
+  /**
+   * Save a story for current user
+   */
+  saveStory: async (storyId) => {
+    const isAuthed = !!localStorage.getItem('pulse_auth_token');
+    if (!isAuthed) {
+      StorageService.toggleSaveStory(storyId);
+      window.dispatchEvent(new CustomEvent('pulse_saved_updated', { detail: { storyId, isSaved: true } }));
+      return { status: 'success', story_id: storyId, is_saved: true };
+    }
+    try {
+      const res = await fetch(`${API_BASE}/stories/${storyId}/save`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      window.dispatchEvent(new CustomEvent('pulse_saved_updated', { detail: { storyId, isSaved: true } }));
+      return data;
+    } catch {
+      throw new Error('Unable to save story. Please try again.');
+    }
+  },
+
+  /**
+   * Remove a story from current user's saved list
+   */
+  unsaveStory: async (storyId) => {
+    const isAuthed = !!localStorage.getItem('pulse_auth_token');
+    if (!isAuthed) {
+      StorageService.toggleSaveStory(storyId);
+      window.dispatchEvent(new CustomEvent('pulse_saved_updated', { detail: { storyId, isSaved: false } }));
+      return { status: 'success', story_id: storyId, is_saved: false };
+    }
+    try {
+      const res = await fetch(`${API_BASE}/stories/${storyId}/save`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      window.dispatchEvent(new CustomEvent('pulse_saved_updated', { detail: { storyId, isSaved: false } }));
+      return data;
+    } catch {
+      throw new Error('Unable to remove story. Please try again.');
+    }
   }
 };
+
 

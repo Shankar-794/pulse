@@ -1,9 +1,10 @@
 from fastapi import APIRouter
-from backend.app.api.endpoints import health, news, stories, topics, preferences, ingestion, clustering, pipeline
+from backend.app.api.endpoints import health, news, stories, topics, preferences, ingestion, clustering, pipeline, auth
 
 api_router = APIRouter()
 
 api_router.include_router(health.router)
+api_router.include_router(auth.router)
 api_router.include_router(pipeline.router)
 api_router.include_router(ingestion.router)
 api_router.include_router(clustering.router)

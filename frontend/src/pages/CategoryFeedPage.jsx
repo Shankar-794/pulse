@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
 import NewsCard from '../components/feed/NewsCard';
+import ErrorState from '../components/common/ErrorState';
 import { Filter, Layers } from 'lucide-react';
 
 const CATEGORY_META = {
@@ -23,8 +24,12 @@ const CATEGORY_META = {
     description: 'Quantum computing architectures, solid-state materials, fusion energy milestones, and biotechnology.'
   },
   business: {
-    title: 'Business & Economics',
-    description: 'Cloud compute allocation economics, venture capital formation, antitrust scrutiny, and markets.'
+    title: 'Business & Enterprise',
+    description: 'Corporate strategy, earnings, enterprise technology adoption, venture capital formation, and industry developments.'
+  },
+  economy: {
+    title: 'Economy & Markets',
+    description: 'Macroeconomic indicators, monetary policy, global trade dynamics, energy commodities, and labor markets.'
   },
   cybersecurity: {
     title: 'Cybersecurity',
@@ -46,25 +51,45 @@ export default function CategoryFeedPage() {
 
   const [stories, setStories] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const [minImportance, setMinImportance] = useState(0);
 
   const loadCategoryFeed = async () => {
     setLoading(true);
-    const data = await ApiService.getStories({ category: categoryKey });
-    setStories(data.items || []);
-    setLoading(false);
+    setError(false);
+    try {
+      const data = await ApiService.getStories({ category: categoryKey });
+      setStories(data.items || []);
+    } catch {
+      setError(true);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     loadCategoryFeed();
   }, [categoryKey]);
 
-  const handleSaveToggle = (storyId) => {
-    const isSaved = StorageService.toggleSaveStory(storyId);
-    ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
-    setStories((prev) =>
-      prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
-    );
+  const handleSaveToggle = async (storyId) => {
+    if (localStorage.getItem('pulse_auth_token')) {
+      const story = stories.find((s) => s.id === storyId);
+      const willSave = !story?.is_saved;
+      if (willSave) {
+        await ApiService.saveStory(storyId);
+      } else {
+        await ApiService.unsaveStory(storyId);
+      }
+      setStories((prev) =>
+        prev.map((s) => (s.id === storyId ? { ...s, is_saved: willSave } : s))
+      );
+    } else {
+      const isSaved = StorageService.toggleSaveStory(storyId);
+      ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
+      setStories((prev) =>
+        prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
+      );
+    }
   };
 
   const handleHide = (storyId) => {
@@ -124,10 +149,12 @@ export default function CategoryFeedPage() {
         <div className="p-16 text-center text-sm text-news-text-secondary">
           Loading {meta.title} stories...
         </div>
+      ) : error ? (
+        <ErrorState onRetry={loadCategoryFeed} />
       ) : filteredStories.length === 0 ? (
         <div className="p-16 bg-news-surface border border-news-border rounded-xl text-center space-y-2 shadow-card">
           <Layers className="w-8 h-8 text-slate-400 mx-auto" />
-          <p className="text-base font-semibold text-news-text-primary">No stories found in this section.</p>
+          <p className="text-base font-semibold text-news-text-primary">No stories available yet.</p>
           <p className="text-xs text-news-text-secondary">Try switching the filter to all stories or trigger an update.</p>
         </div>
       ) : (

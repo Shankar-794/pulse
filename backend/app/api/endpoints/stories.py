@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Query, Depends
+from typing import List, Optional, Dict, Any, Set
+from datetime import datetime, timezone
 
 from backend.app.core.db_repository import db_repository
 from backend.app.services.news_service import news_service
@@ -8,8 +8,10 @@ from backend.app.services.story_analysis_service import story_analysis_service
 from backend.app.services.importance_service import importance_service
 from backend.app.services.personal_relevance_service import personal_relevance_service
 from backend.app.services.feed_ranking_service import feed_ranking_service
+from backend.app.services.behavioral_learning_service import behavioral_learning_service
 from backend.app.schemas.preferences import PersonalRelevanceBreakdown
 from backend.app.schemas.story import StoryListResponse, StoryResponse
+from backend.app.api.deps import get_current_user, get_optional_user
 
 from backend.app.services.story_evolution_service import story_evolution_service
 
@@ -17,7 +19,7 @@ router = APIRouter()
 
 
 
-def format_db_story(story: Dict[str, Any]) -> Dict[str, Any]:
+def format_db_story(story: Dict[str, Any], saved_ids: Optional[Set[str]] = None) -> Dict[str, Any]:
     """
     Transforms a database Story cluster with linked articles and AI intelligence into full API StoryResponse.
     """
@@ -135,7 +137,7 @@ def format_db_story(story: Dict[str, Any]) -> Dict[str, Any]:
         "source_count": source_count,
         "article_count": len(raw_articles) or story.get("article_count", 1),
         "is_breaking": is_breaking,
-        "is_saved": False,
+        "is_saved": (story.get("id") in saved_ids) if saved_ids is not None else bool(story.get("is_saved", False)),
         "analyzed": is_analyzed,
         "ai_title": story.get("ai_title"),
         "ai_summary": story.get("ai_summary"),
@@ -164,7 +166,7 @@ def format_db_story(story: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
-def article_to_story(art: Dict[str, Any]) -> Dict[str, Any]:
+def article_to_story(art: Dict[str, Any], saved_ids: Optional[Set[str]] = None) -> Dict[str, Any]:
     """
     Transforms a single unclustered article into a story representation.
     """
@@ -218,7 +220,7 @@ def article_to_story(art: Dict[str, Any]) -> Dict[str, Any]:
         "source_count": 1,
         "article_count": 1,
         "is_breaking": is_breaking,
-        "is_saved": False,
+        "is_saved": (art.get("id") in saved_ids) if saved_ids is not None else bool(art.get("is_saved", False)),
         "story_status": "ACTIVE",
         "breaking_score": 85 if is_breaking else 30,
         "breaking_level": "BREAKING" if is_breaking else "STABLE",
@@ -259,17 +261,89 @@ def article_to_story(art: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@router.get("/stories/saved", tags=["stories", "saved"])
+async def get_saved_stories(
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user)
+):
+    """
+    Retrieve all stories saved by the authenticated user.
+    Returns empty list if unauthenticated or no stories saved.
+    """
+    if not user:
+        return {
+            "total": 0,
+            "items": []
+        }
+    saved_stories = db_repository.get_saved_stories(user["id"])
+    saved_ids = set(db_repository.get_saved_story_ids(user["id"]))
+    formatted = [format_db_story(s, saved_ids=saved_ids) for s in saved_stories]
+    return {
+        "total": len(formatted),
+        "items": formatted
+    }
+
+
+@router.post("/stories/{story_id}/save", tags=["stories", "saved"])
+async def save_story(
+    story_id: str,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Saves a story for the authenticated user and records a behavioral interaction.
+    """
+    user_id = user["id"]
+    db_repository.save_story(user_id, story_id)
+    behavioral_learning_service.process_interaction(
+        user_id=user_id,
+        story_id=story_id,
+        interaction_type="save",
+        metadata={"timestamp": datetime.now(timezone.utc).isoformat()}
+    )
+    return {
+        "status": "success",
+        "story_id": story_id,
+        "is_saved": True,
+        "user_id": user_id
+    }
+
+
+@router.delete("/stories/{story_id}/save", tags=["stories", "saved"])
+async def unsave_story(
+    story_id: str,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Removes a story from the authenticated user's saved stories list.
+    """
+    user_id = user["id"]
+    db_repository.unsave_story(user_id, story_id)
+    return {
+        "status": "success",
+        "story_id": story_id,
+        "is_saved": False,
+        "user_id": user_id
+    }
+
+
 @router.get("/feed", response_model=StoryListResponse, tags=["feed", "stories"])
 async def get_personalized_feed(
     limit: int = Query(50, ge=1, le=100, description="Max stories to return"),
     offset: int = Query(0, ge=0, description="Stories offset for pagination"),
-    user_id: str = Query("default_user", description="Target user identifier")
+    user_id: Optional[str] = Query(None, description="Target user identifier"),
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user)
 ):
     """
     Returns personalized ranked feed balancing personal relevance, global importance,
     freshness, urgency, and category diversity interleaving.
     """
-    ranked_stories = feed_ranking_service.rank_feed(user_id=user_id, limit=limit, offset=offset)
+    effective_user_id = user["id"] if user else (user_id or "default_user")
+    ranked_stories = feed_ranking_service.rank_feed(user_id=effective_user_id, limit=limit, offset=offset)
+    saved_ids = set(db_repository.get_saved_story_ids(effective_user_id)) if user else set()
+    for s in ranked_stories:
+        if isinstance(s, dict):
+            s["is_saved"] = s.get("id") in saved_ids
+        elif hasattr(s, "is_saved"):
+            s.is_saved = s.id in saved_ids
     return {
         "total": len(ranked_stories),
         "items": ranked_stories
@@ -278,14 +352,14 @@ async def get_personalized_feed(
 
 @router.get("/stories", tags=["stories"])
 async def get_stories(
-
-    category: Optional[str] = Query(None, description="Filter by category e.g. 'ai', 'technology', 'world'"),
+    category: Optional[str] = Query(None, description="Filter by category e.g. 'ai', 'technology', 'world', 'business', 'economy'"),
     topic: Optional[str] = Query(None, description="Filter by topic"),
     section: Optional[str] = Query(None, description="Filter by feed section: 'breaking', 'important'"),
     search: Optional[str] = Query(None, description="Search keyword"),
     min_sources: Optional[int] = Query(1, ge=1, description="Minimum number of unique sources"),
     min_importance: Optional[int] = Query(None, ge=0, le=100),
-    use_demo_fallback: bool = Query(False, description="Explicitly use mock fallback if DB empty")
+    use_demo_fallback: bool = Query(False, description="Explicitly use mock fallback if DB empty"),
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user)
 ):
     """
     Retrieve news stories.
@@ -294,6 +368,9 @@ async def get_stories(
     """
     total_articles = db_repository.get_total_count()
     total_stories = db_repository.get_total_story_count()
+
+    effective_user_id = user["id"] if user else "default_user"
+    saved_ids = set(db_repository.get_saved_story_ids(effective_user_id)) if user else set()
 
     # 1. If DB is completely empty (no articles and no stories)
     if total_articles == 0 and total_stories == 0 and not use_demo_fallback:
@@ -312,6 +389,8 @@ async def get_stories(
             search=search,
             min_importance=min_importance
         )
+        for it in items:
+            it["is_saved"] = it.get("id") in saved_ids
         return {
             "total": len(items),
             "items": items,
@@ -325,7 +404,7 @@ async def get_stories(
             min_sources=min_sources or 1,
             limit=100
         )
-        stories = [format_db_story(s) for s in raw_stories]
+        stories = [format_db_story(s, saved_ids=saved_ids) for s in raw_stories]
     else:
         # Fallback to unclustered articles
         real_articles = db_repository.get_articles(
@@ -333,7 +412,7 @@ async def get_stories(
             search=search,
             limit=100
         )
-        stories = [article_to_story(art) for art in real_articles]
+        stories = [article_to_story(art, saved_ids=saved_ids) for art in real_articles]
 
     # Apply search filter if provided
     if search:
@@ -363,7 +442,8 @@ async def get_stories(
 @router.get("/stories/{story_id}/relevance", response_model=PersonalRelevanceBreakdown, tags=["stories", "personalization"])
 async def get_story_relevance_breakdown(
     story_id: str,
-    user_id: str = Query("default_user", description="Target user identifier")
+    user_id: Optional[str] = Query(None, description="Target user identifier"),
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user)
 ):
     """
     Provides grounded, deterministic breakdown and explanation of why this story
@@ -375,31 +455,38 @@ async def get_story_relevance_breakdown(
     if not story:
         raise HTTPException(status_code=404, detail=f"Story with ID '{story_id}' not found")
 
-    profile = db_repository.get_user_preferences(user_id)
+    effective_user_id = user["id"] if user else (user_id or "default_user")
+    profile = db_repository.get_user_preferences(effective_user_id)
     breakdown = personal_relevance_service.compute_relevance(story, profile)
     return breakdown
 
 
 @router.get("/stories/{story_id}", tags=["stories"])
-async def get_story(story_id: str):
-
+async def get_story(
+    story_id: str,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user)
+):
     """
     Retrieve single story details (either from real clustered stories or fallback).
     """
+    saved_ids = set(db_repository.get_saved_story_ids(user["id"])) if user else set()
+
     # 1. Check clustered stories table
     story = db_repository.get_story_by_id(story_id)
     if story:
-        return format_db_story(story)
+        return format_db_story(story, saved_ids=saved_ids)
 
     # 2. Check individual articles table
     article = db_repository.get_article_by_id(story_id)
     if article:
-        return article_to_story(article)
+        return article_to_story(article, saved_ids=saved_ids)
 
     # 3. Check mock service if it's a foundation story ID
     mock_story = news_service.get_story_by_id(story_id)
     if mock_story:
-        return mock_story
+        mock_copy = dict(mock_story)
+        mock_copy["is_saved"] = mock_story.get("id") in saved_ids
+        return mock_copy
 
     raise HTTPException(status_code=404, detail=f"Story with ID '{story_id}' not found")
 

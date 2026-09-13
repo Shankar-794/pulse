@@ -96,11 +96,21 @@ export default function StoryDetailPage() {
     };
   }, [id]);
 
-  const handleSaveToggle = () => {
+  const handleSaveToggle = async () => {
     if (!story) return;
-    const isSaved = StorageService.toggleSaveStory(story.id);
-    setStory((prev) => ({ ...prev, is_saved: isSaved }));
-    ApiService.recordInteraction(story.id, isSaved ? 'save' : 'unsave');
+    if (localStorage.getItem('pulse_auth_token')) {
+      const willSave = !story.is_saved;
+      if (willSave) {
+        await ApiService.saveStory(story.id);
+      } else {
+        await ApiService.unsaveStory(story.id);
+      }
+      setStory((prev) => ({ ...prev, is_saved: willSave }));
+    } else {
+      const isSaved = StorageService.toggleSaveStory(story.id);
+      setStory((prev) => ({ ...prev, is_saved: isSaved }));
+      ApiService.recordInteraction(story.id, isSaved ? 'save' : 'unsave');
+    }
   };
 
   const handleShare = () => {

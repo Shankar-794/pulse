@@ -9,7 +9,7 @@ import json
 import uuid
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from pathlib import Path
@@ -20,18 +20,98 @@ logger = logging.getLogger("pulse.db.repository")
 DB_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SQLITE_PATH = DB_DIR / "pulse.db"
 
+
+class HardenedSQLiteConnection:
+    """
+    Proxy and context manager that hardens SQLite connections for concurrent environments (Phase 9 Step 1):
+    1. Delegates transaction boundary management to sqlite3.Connection.__enter__ / __exit__
+       (automatically commits on clean exit, automatically rolls back on exception).
+    2. Guaranteed connection closure in a finally block (prevents leaked locks and file descriptors).
+    3. Seamlessly proxies all connection methods/attributes (execute, cursor, commit, etc.).
+    """
+    def __init__(self, raw_conn: sqlite3.Connection):
+        self._raw_conn = raw_conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._raw_conn.__enter__()
+        return self._raw_conn
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return self._raw_conn.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._raw_conn.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw_conn, name)
+
+
 class DbRepository:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or str(DEFAULT_SQLITE_PATH)
         self.init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=15.0)
+    def _create_raw_connection(self) -> sqlite3.Connection:
+        """
+        Creates and configures a raw SQLite connection with concurrency pragmas (Phase 9 Step 1).
+        Configures busy_timeout, WAL journal mode, and NORMAL synchronization.
+        """
+        timeout_sec = getattr(settings, "SQLITE_BUSY_TIMEOUT_MS", 30000) / 1000.0
+        conn = sqlite3.connect(self.db_path, timeout=timeout_sec)
         conn.row_factory = sqlite3.Row
+
+        busy_timeout_ms = getattr(settings, "SQLITE_BUSY_TIMEOUT_MS", 30000)
+        conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms};")
+
+        # Configure WAL mode and pragmas for persistent disk databases
+        is_disk_db = self.db_path != ":memory:" and not self.db_path.startswith("file:")
+        if is_disk_db and getattr(settings, "SQLITE_WAL_MODE", True):
+            conn.execute("PRAGMA journal_mode = WAL;")
+            sync_mode = getattr(settings, "SQLITE_SYNCHRONOUS", "NORMAL")
+            conn.execute(f"PRAGMA synchronous = {sync_mode};")
+            conn.execute("PRAGMA cache_size = -64000;")
+            conn.execute("PRAGMA temp_store = MEMORY;")
+
         return conn
 
+    def _get_connection(self) -> HardenedSQLiteConnection:
+        """
+        Provides a hardened connection with deterministic transaction boundaries
+        and guaranteed connection cleanup upon context exit.
+        """
+        raw_conn = self._create_raw_connection()
+        return HardenedSQLiteConnection(raw_conn)
+
+    def get_db_diagnostics(self) -> Dict[str, Any]:
+        """
+        Returns runtime SQLite concurrency diagnostics and pragma states (Phase 9 Step 1).
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            jm = cursor.execute("PRAGMA journal_mode;").fetchone()
+            bt = cursor.execute("PRAGMA busy_timeout;").fetchone()
+            sync = cursor.execute("PRAGMA synchronous;").fetchone()
+            cs = cursor.execute("PRAGMA cache_size;").fetchone()
+            ts = cursor.execute("PRAGMA temp_store;").fetchone()
+            return {
+                "db_path": str(self.db_path),
+                "is_wal_mode": bool(jm and str(jm[0]).lower() == "wal"),
+                "journal_mode": jm[0] if jm else "unknown",
+                "busy_timeout_ms": bt[0] if bt else 0,
+                "synchronous": sync[0] if sync else 0,
+                "cache_size": cs[0] if cs else 0,
+                "temp_store": ts[0] if ts else 0
+            }
+
     def init_db(self):
-        """Creates tables, constraints, and indexes."""
+        """Creates tables, constraints, and indexes with WAL mode enabled."""
+        # For disk databases, explicitly set WAL mode and pragmas on initialization
+        is_disk_db = self.db_path != ":memory:" and not self.db_path.startswith("file:")
+        if is_disk_db and getattr(settings, "SQLITE_WAL_MODE", True):
+            with self._get_connection() as conn:
+                conn.execute("PRAGMA journal_mode = WAL;")
+                conn.execute(f"PRAGMA synchronous = {getattr(settings, 'SQLITE_SYNCHRONOUS', 'NORMAL')};")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -260,6 +340,34 @@ class DbRepository:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_interactions_user_story ON user_interactions(user_id, story_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_interactions_created_at ON user_interactions(created_at DESC)")
 
+            # Users table (Authentication & Identity)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                full_name TEXT,
+                picture_url TEXT,
+                oauth_provider TEXT DEFAULT 'google',
+                oauth_sub TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_oauth_sub ON users(oauth_sub)")
+
+            # User Saved Stories table (User Data Isolation)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_saved_stories (
+                user_id TEXT NOT NULL,
+                story_id TEXT NOT NULL,
+                saved_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, story_id),
+                FOREIGN KEY (story_id) REFERENCES stories(id)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_stories_user ON user_saved_stories(user_id, saved_at DESC)")
+
             # Phase 8.2: Pipeline Runs table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -282,14 +390,15 @@ class DbRepository:
                 failed_stages TEXT DEFAULT '[]',
                 error_message TEXT,
                 stage_metrics_json TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_heartbeat_at TEXT
             )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_created_at ON pipeline_runs(created_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_at ON pipeline_runs(started_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status)")
 
-            # Ensure Phase 8.2 columns exist (safe migration)
+            # Ensure Phase 8.2 & Phase 9.1 columns exist (safe migration)
             cursor.execute("PRAGMA table_info(pipeline_runs)")
             existing_run_cols = [row["name"] for row in cursor.fetchall()]
             pipeline_run_cols = [
@@ -312,7 +421,8 @@ class DbRepository:
                 ("failed_stages", "TEXT DEFAULT '[]'"),
                 ("error_message", "TEXT"),
                 ("stage_metrics_json", "TEXT"),
-                ("created_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
+                ("created_at", "TEXT DEFAULT CURRENT_TIMESTAMP"),
+                ("last_heartbeat_at", "TEXT")
             ]
             for col_name, col_type in pipeline_run_cols:
                 if col_name not in existing_run_cols:
@@ -809,7 +919,7 @@ class DbRepository:
             if not row:
                 return {
                     "user_id": user_id,
-                    "interests": list(getattr(settings, "DEFAULT_USER_INTERESTS", ["AI", "Software Engineering", "Cybersecurity", "Technology", "Science", "Space", "World", "Business"])),
+                    "interests": list(getattr(settings, "DEFAULT_USER_INTERESTS", ["AI", "Software Engineering", "Cybersecurity", "Technology", "Science", "Space", "World", "Business", "Economy"])),
                     "interest_weights": dict(getattr(settings, "DEFAULT_INTEREST_WEIGHTS", {})),
                     "topic_affinities": {},
                     "entity_affinities": {},
@@ -914,20 +1024,9 @@ class DbRepository:
                 results.append(d)
             return results
 
-    def get_saved_story_ids(self, user_id: str = "default_user") -> List[str]:
-        """Returns list of currently saved story IDs."""
-        query = """
-        SELECT story_id FROM user_interactions
-        WHERE user_id = ? AND interaction_type = 'save'
-        AND story_id NOT IN (
-            SELECT story_id FROM user_interactions
-            WHERE user_id = ? AND interaction_type = 'unsave'
-        )
-        """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, (user_id, user_id))
-            return [row[0] for row in cursor.fetchall()]
+    # =========================================================================
+    # User Saved Stories (User Isolation)
+    # =========================================================================
 
     def get_hidden_story_ids(self, user_id: str = "default_user") -> List[str]:
         """Returns set of hidden story IDs."""
@@ -1142,8 +1241,16 @@ class DbRepository:
                 except Exception:
                     pass
 
+            # 3. Concurrency / WAL diagnostics
+            jm = cursor.execute("PRAGMA journal_mode;").fetchone()
+            bt = cursor.execute("PRAGMA busy_timeout;").fetchone()
+            wal_active = bool(jm and str(jm[0]).lower() == "wal")
+
             return {
                 "database_healthy": db_healthy,
+                "wal_mode_active": wal_active,
+                "journal_mode": jm[0] if jm else "unknown",
+                "busy_timeout_ms": bt[0] if bt else 0,
                 "total_articles": total_articles,
                 "total_stories": total_stories,
                 "analyzed_stories": analyzed_stories,
@@ -1353,6 +1460,21 @@ class DbRepository:
         # Ensure bool conversion for skip_ingestion
         d["skip_ingestion"] = bool(d.get("skip_ingestion"))
 
+        # Operational metrics aliases (Phase 8.2 Step 4)
+        stages = d.get("stages") or {}
+        ingestion_metrics = stages.get("ingestion") or {}
+        personal_relevance_metrics = stages.get("personal_relevance") or {}
+
+        d["duplicate_articles"] = ingestion_metrics.get("duplicates", 0)
+        d["duplicates"] = d["duplicate_articles"]
+        d["failed_ingestion_sources"] = ingestion_metrics.get("failed_sources", 0)
+        d["stories_importance_scored"] = d.get("stories_scored", 0)
+        d["stories_relevance_scored"] = personal_relevance_metrics.get("stories_evaluated", 0)
+        d["feed_items_ready"] = d.get("feed_items", 0)
+
+        # Heartbeat liveness timestamp (Phase 9.1 Step 4)
+        d["last_heartbeat_at"] = d.get("last_heartbeat_at") or d.get("started_at") or d.get("created_at")
+
         return d
 
     def create_pipeline_run(
@@ -1368,6 +1490,8 @@ class DbRepository:
 
         now_iso = datetime.utcnow().isoformat()
         run_id = params.get("run_id") or f"run_{uuid.uuid4().hex[:12]}"
+        started_at = params.get("started_at") or now_iso
+        heartbeat = params.get("last_heartbeat_at") or started_at or now_iso
 
         stage_metrics = params.get("stage_metrics") or params.get("stages") or {}
         if isinstance(stage_metrics, (dict, list)):
@@ -1387,19 +1511,19 @@ class DbRepository:
             trigger_type, user_id, skip_ingestion, total_articles, new_articles,
             total_stories, stories_created, stories_analyzed, stories_scored,
             stories_evolved, feed_items, failed_stages, error_message,
-            stage_metrics_json, created_at
+            stage_metrics_json, created_at, last_heartbeat_at
         ) VALUES (
             :run_id, :status, :started_at, :completed_at, :duration_seconds,
             :trigger_type, :user_id, :skip_ingestion, :total_articles, :new_articles,
             :total_stories, :stories_created, :stories_analyzed, :stories_scored,
             :stories_evolved, :feed_items, :failed_stages, :error_message,
-            :stage_metrics_json, :created_at
+            :stage_metrics_json, :created_at, :last_heartbeat_at
         )
         """
         db_params = {
             "run_id": run_id,
             "status": params.get("status", "running"),
-            "started_at": params.get("started_at") or now_iso,
+            "started_at": started_at,
             "completed_at": params.get("completed_at"),
             "duration_seconds": params.get("duration_seconds") if params.get("duration_seconds") is not None else params.get("total_duration_seconds"),
             "trigger_type": params.get("trigger_type", "manual"),
@@ -1416,7 +1540,8 @@ class DbRepository:
             "failed_stages": failed_stages_json,
             "error_message": params.get("error_message"),
             "stage_metrics_json": stage_metrics_json,
-            "created_at": params.get("created_at") or now_iso
+            "created_at": params.get("created_at") or now_iso,
+            "last_heartbeat_at": heartbeat
         }
 
         with self._get_connection() as conn:
@@ -1453,13 +1578,19 @@ class DbRepository:
                 "status", "started_at", "completed_at", "duration_seconds",
                 "trigger_type", "user_id", "total_articles", "new_articles",
                 "total_stories", "stories_created", "stories_analyzed",
-                "stories_scored", "stories_evolved", "feed_items", "error_message"
+                "stories_scored", "stories_evolved", "feed_items", "error_message",
+                "last_heartbeat_at"
             ):
                 fields.append(f"{k} = :{k}")
                 params[k] = v
 
         if not fields:
             return False
+
+        # Phase 9.1 Step 4: Advance heartbeat on progress unless explicitly specified
+        if "last_heartbeat_at" not in updates:
+            fields.append("last_heartbeat_at = :auto_heartbeat")
+            params["auto_heartbeat"] = datetime.utcnow().isoformat()
 
         sql = f"UPDATE pipeline_runs SET {', '.join(fields)} WHERE run_id = :run_id"
         with self._get_connection() as conn:
@@ -1494,6 +1625,301 @@ class DbRepository:
                 return None
             return self._format_pipeline_run_row(row)
 
+    def acquire_active_pipeline_run(
+        self,
+        run_data: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Atomically checks and acquires an active pipeline run slot using SQLite BEGIN IMMEDIATE (Phase 9.1 Step 3).
+        Serializes acquisition across concurrent processes/threads:
+        1. Acquires immediate write transaction lock.
+        2. Checks whether a pipeline run with status 'queued' or 'running' exists.
+        3. If an active run exists, immediately rolls back and returns rejection with active run metadata.
+        4. If no active run exists, inserts the new run record in 'queued' status within the same transaction,
+           commits atomically, and returns success confirmation with the created run record.
+        Rolls back on error and guarantees connection closure via HardenedSQLiteConnection.
+        """
+        params = dict(run_data or {})
+        params.update(kwargs)
+
+        now_iso = datetime.utcnow().isoformat()
+        run_id = params.get("run_id") or f"run_{uuid.uuid4().hex[:12]}"
+        trigger_type = params.get("trigger_type", "manual")
+        user_id = params.get("user_id", "default_user")
+        skip_ingestion = 1 if params.get("skip_ingestion") else 0
+        started_at = params.get("started_at") or now_iso
+        status = params.get("status", "queued")
+
+        stage_metrics = params.get("stage_metrics") or params.get("stages") or {}
+        if isinstance(stage_metrics, (dict, list)):
+            stage_metrics_json = json.dumps(stage_metrics)
+        else:
+            stage_metrics_json = str(stage_metrics) if stage_metrics else "{}"
+
+        failed_stages = params.get("failed_stages") or []
+        if isinstance(failed_stages, (list, set)):
+            failed_stages_json = json.dumps(list(failed_stages))
+        else:
+            failed_stages_json = str(failed_stages) if failed_stages else "[]"
+
+        insert_sql = """
+        INSERT INTO pipeline_runs (
+            run_id, status, started_at, completed_at, duration_seconds,
+            trigger_type, user_id, skip_ingestion, total_articles, new_articles,
+            total_stories, stories_created, stories_analyzed, stories_scored,
+            stories_evolved, feed_items, failed_stages, error_message,
+            stage_metrics_json, created_at, last_heartbeat_at
+        ) VALUES (
+            :run_id, :status, :started_at, :completed_at, :duration_seconds,
+            :trigger_type, :user_id, :skip_ingestion, :total_articles, :new_articles,
+            :total_stories, :stories_created, :stories_analyzed, :stories_scored,
+            :stories_evolved, :feed_items, :failed_stages, :error_message,
+            :stage_metrics_json, :created_at, :last_heartbeat_at
+        )
+        """
+
+        heartbeat = params.get("last_heartbeat_at") or started_at or now_iso
+        db_params = {
+            "run_id": run_id,
+            "status": status,
+            "started_at": started_at,
+            "completed_at": params.get("completed_at"),
+            "duration_seconds": params.get("duration_seconds") if params.get("duration_seconds") is not None else params.get("total_duration_seconds"),
+            "trigger_type": trigger_type,
+            "user_id": user_id,
+            "skip_ingestion": skip_ingestion,
+            "total_articles": int(params.get("total_articles") or 0),
+            "new_articles": int(params.get("new_articles") or 0),
+            "total_stories": int(params.get("total_stories") or 0),
+            "stories_created": int(params.get("stories_created") or 0),
+            "stories_analyzed": int(params.get("stories_analyzed") or 0),
+            "stories_scored": int(params.get("stories_scored") or 0),
+            "stories_evolved": int(params.get("stories_evolved") or 0),
+            "feed_items": int(params.get("feed_items") or 0),
+            "failed_stages": failed_stages_json,
+            "error_message": params.get("error_message"),
+            "stage_metrics_json": stage_metrics_json,
+            "created_at": params.get("created_at") or now_iso,
+            "last_heartbeat_at": heartbeat
+        }
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
+
+            cursor.execute(
+                "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            )
+            existing_row = cursor.fetchone()
+            if existing_row:
+                active_run = self._format_pipeline_run_row(existing_row)
+                conn.rollback()
+                return {
+                    "acquired": False,
+                    "run_id": None,
+                    "run": None,
+                    "active_run": active_run,
+                    "message": f"A pipeline execution is already in progress ({active_run['run_id']})."
+                }
+
+            cursor.execute(insert_sql, db_params)
+            conn.commit()
+
+        created_run = self.get_pipeline_run(run_id)
+        return {
+            "acquired": True,
+            "run_id": run_id,
+            "run": created_run,
+            "active_run": None,
+            "message": "Pipeline run acquired successfully."
+        }
+
+    def reconcile_orphan_pipeline_runs(self) -> int:
+        """
+        Reconciles orphan pipeline runs on startup (Phase 9.1 Step 2).
+        Finds all pipeline_runs whose status is 'queued' or 'running', marks them as
+        'interrupted', sets completed_at to the current UTC timestamp, and records
+        an informative error message: 'Execution interrupted by server restart'.
+        Returns the number of reconciled rows.
+        """
+        now_iso = datetime.utcnow().isoformat()
+        sql = """
+        UPDATE pipeline_runs
+        SET status = 'interrupted',
+            completed_at = :completed_at,
+            error_message = :error_message
+        WHERE status IN ('queued', 'running')
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, {
+                "completed_at": now_iso,
+                "error_message": "Execution interrupted by server restart"
+            })
+            conn.commit()
+            return cursor.rowcount
+
+    def abort_active_pipeline_run(self, run_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Administratively aborts an active ('queued' or 'running') pipeline run (Phase 9.1 Step 2).
+        Transitions status to 'interrupted', records completed_at UTC timestamp,
+        and sets error_message = 'Manually aborted by operator'.
+        Returns the updated run dict, or None if no active run existed.
+        """
+        now = datetime.utcnow()
+        now_iso = now.isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if run_id:
+                cursor.execute(
+                    "SELECT * FROM pipeline_runs WHERE run_id = ? AND status IN ('queued', 'running') LIMIT 1",
+                    (run_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            target_run_id = row["run_id"]
+            started_at = row["started_at"]
+            duration_seconds = None
+            if started_at:
+                try:
+                    s_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00")).replace(tzinfo=None)
+                    duration_seconds = max(0.0, round((now - s_dt).total_seconds(), 2))
+                except Exception:
+                    pass
+
+            cursor.execute(
+                """
+                UPDATE pipeline_runs
+                SET status = 'interrupted',
+                    completed_at = :completed_at,
+                    duration_seconds = COALESCE(:duration_seconds, duration_seconds),
+                    error_message = :error_message,
+                    last_heartbeat_at = :completed_at
+                WHERE run_id = :run_id AND status IN ('queued', 'running')
+                """,
+                {
+                    "run_id": target_run_id,
+                    "completed_at": now_iso,
+                    "duration_seconds": duration_seconds,
+                    "error_message": "Manually aborted by operator"
+                }
+            )
+            conn.commit()
+
+        return self.get_pipeline_run(target_run_id)
+
+    def update_pipeline_heartbeat(self, run_id: str, timestamp: Optional[str] = None) -> bool:
+        """
+        Updates the durable liveness heartbeat timestamp for an active pipeline run (Phase 9.1 Step 4).
+        """
+        ts = timestamp or datetime.utcnow().isoformat()
+        return self.update_pipeline_run(run_id, {"last_heartbeat_at": ts})
+
+    def reconcile_stale_pipeline_runs(
+        self,
+        stale_timeout_seconds: Optional[int] = None,
+        queue_timeout_seconds: Optional[int] = None,
+        now: Optional[datetime] = None
+    ) -> int:
+        """
+        Reconciles genuinely stale or abandoned pipeline runs (Phase 9.1 Step 4).
+        Inspects only runs with status in ('queued', 'running'):
+        - Running runs: stale if time since last heartbeat/progress exceeds stale_timeout_seconds.
+        - Queued runs: stale if time in queue without starting exceeds queue_timeout_seconds.
+        Transitions eligible runs to 'interrupted', sets completed_at, and records a clear
+        error message. Never touches completed/failed/aborted runs.
+        Returns the number of reclaimed stale runs.
+        """
+        if stale_timeout_seconds is None:
+            stale_timeout_seconds = getattr(settings, "PIPELINE_STALE_TIMEOUT_SECONDS", 600)
+        if queue_timeout_seconds is None:
+            queue_timeout_seconds = getattr(settings, "PIPELINE_STALE_QUEUE_TIMEOUT_SECONDS", 300)
+
+        current_time = now or datetime.utcnow()
+        current_iso = current_time.isoformat()
+
+        def _parse_ts(val: Optional[str]) -> Optional[datetime]:
+            if not val:
+                return None
+            try:
+                clean = val.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(clean)
+                if dt.tzinfo is not None:
+                    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except Exception:
+                return None
+
+        stale_runs_to_reclaim = []
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at ASC"
+            )
+            rows = cursor.fetchall()
+            for r in rows:
+                run = self._format_pipeline_run_row(r)
+                status = run.get("status")
+                ref_ts = run.get("last_heartbeat_at") or run.get("started_at") or run.get("created_at")
+                ref_dt = _parse_ts(ref_ts)
+                if not ref_dt:
+                    continue
+
+                elapsed = (current_time - ref_dt).total_seconds()
+                if status == "running" and elapsed > stale_timeout_seconds:
+                    stale_runs_to_reclaim.append({
+                        "run_id": run["run_id"],
+                        "error_message": f"Execution timed out: no heartbeat progress for {int(elapsed)}s (threshold: {stale_timeout_seconds}s)",
+                        "started_at": run.get("started_at")
+                    })
+                elif status == "queued" and elapsed > queue_timeout_seconds:
+                    stale_runs_to_reclaim.append({
+                        "run_id": run["run_id"],
+                        "error_message": f"Execution timed out in queue: abandoned for {int(elapsed)}s without starting (threshold: {queue_timeout_seconds}s)",
+                        "started_at": run.get("started_at")
+                    })
+
+            if not stale_runs_to_reclaim:
+                return 0
+
+            reclaimed_count = 0
+            for item in stale_runs_to_reclaim:
+                duration_seconds = None
+                s_dt = _parse_ts(item.get("started_at"))
+                if s_dt:
+                    duration_seconds = max(0.0, round((current_time - s_dt).total_seconds(), 2))
+
+                cursor.execute(
+                    """
+                    UPDATE pipeline_runs
+                    SET status = 'interrupted',
+                        completed_at = :completed_at,
+                        duration_seconds = COALESCE(:duration_seconds, duration_seconds),
+                        error_message = :error_message,
+                        last_heartbeat_at = :completed_at
+                    WHERE run_id = :run_id AND status IN ('queued', 'running')
+                    """,
+                    {
+                        "run_id": item["run_id"],
+                        "completed_at": current_iso,
+                        "duration_seconds": duration_seconds,
+                        "error_message": item["error_message"]
+                    }
+                )
+                if cursor.rowcount > 0:
+                    reclaimed_count += cursor.rowcount
+
+            conn.commit()
+            return reclaimed_count
+
     def get_latest_pipeline_run(self) -> Optional[Dict[str, Any]]:
         """
         Retrieves the most recent pipeline execution.
@@ -1507,16 +1933,225 @@ class DbRepository:
                 return None
             return self._format_pipeline_run_row(row)
 
-    def get_pipeline_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
+    def get_pipeline_runs(
+        self,
+        limit: int = 20,
+        status: Optional[str] = None,
+        trigger_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Retrieves recent pipeline executions ordered newest first.
+        Retrieves recent pipeline executions ordered newest first, with optional status and trigger_type filters.
         """
-        sql = "SELECT * FROM pipeline_runs ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        sql = "SELECT * FROM pipeline_runs"
+        clauses = []
+        params = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if trigger_type:
+            clauses.append("trigger_type = ?")
+            params.append(trigger_type)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(sql, (limit,))
+            cursor.execute(sql, tuple(params))
             rows = cursor.fetchall()
             return [self._format_pipeline_run_row(row) for row in rows]
+
+    def get_failure_stats(self) -> Dict[str, Any]:
+        """
+        Calculates consecutive failure count, last failure timestamp, and last failure message
+        from persistent pipeline execution history.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT status, completed_at, started_at, error_message, stage_metrics_json
+                FROM pipeline_runs
+                WHERE status IN ('success', 'partial_failure', 'failed')
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 50
+            """)
+            rows = cursor.fetchall()
+
+        consecutive_failures = 0
+        last_failure_at = None
+        last_failure_message = None
+
+        for row in rows:
+            status = row["status"]
+            if status in ("failed", "partial_failure"):
+                consecutive_failures += 1
+                if last_failure_at is None:
+                    last_failure_at = row["completed_at"] or row["started_at"]
+                    msg = row["error_message"]
+                    if not msg and row["stage_metrics_json"]:
+                        try:
+                            stg = json.loads(row["stage_metrics_json"])
+                            for s_name, s_data in stg.items():
+                                if s_data.get("status") in ("failed", "partial_failure") and s_data.get("error"):
+                                    msg = f"Stage {s_name}: {s_data.get('error')}"
+                                    break
+                        except Exception:
+                            pass
+                    last_failure_message = msg or ("Stage failure occurred" if status == "partial_failure" else "Pipeline failed")
+            else:
+                break
+
+        if last_failure_at is None:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT completed_at, started_at, error_message, stage_metrics_json, status
+                    FROM pipeline_runs
+                    WHERE status IN ('partial_failure', 'failed')
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                """)
+                f_row = cursor.fetchone()
+                if f_row:
+                    last_failure_at = f_row["completed_at"] or f_row["started_at"]
+                    last_failure_message = f_row["error_message"] or ("Stage failure occurred" if f_row["status"] == "partial_failure" else "Pipeline failed")
+
+        return {
+            "consecutive_failure_count": consecutive_failures,
+            "last_failure_at": last_failure_at,
+            "last_failure_message": last_failure_message
+        }
+
+    # ==========================================
+    # User & Authentication Persistence
+    # ==========================================
+
+    def upsert_user(
+        self,
+        email: str,
+        full_name: str,
+        picture_url: str = "",
+        oauth_provider: str = "google",
+        oauth_sub: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Creates or updates a user upon authentication.
+        Deterministic ID or UUID generation.
+        """
+        norm_email = email.strip().lower()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            existing = None
+            if oauth_sub:
+                cursor.execute(
+                    "SELECT * FROM users WHERE oauth_provider = ? AND oauth_sub = ? LIMIT 1",
+                    (oauth_provider, oauth_sub)
+                )
+                existing = cursor.fetchone()
+            if not existing:
+                cursor.execute("SELECT * FROM users WHERE email = ? LIMIT 1", (norm_email,))
+                existing = cursor.fetchone()
+
+            if existing:
+                user_id = existing["id"]
+                cursor.execute("""
+                    UPDATE users
+                    SET email = ?, full_name = ?, picture_url = ?, oauth_provider = ?, oauth_sub = ?, last_login_at = ?
+                    WHERE id = ?
+                """, (norm_email, full_name, picture_url, oauth_provider, oauth_sub or existing["oauth_sub"], now, user_id))
+                conn.commit()
+                cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+                return dict(cursor.fetchone())
+            else:
+                user_id = f"usr_{uuid.uuid4().hex[:12]}"
+                cursor.execute("""
+                    INSERT INTO users (id, email, full_name, picture_url, oauth_provider, oauth_sub, created_at, last_login_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (user_id, norm_email, full_name, picture_url, oauth_provider, oauth_sub, now, now))
+                conn.commit()
+                cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+                return dict(cursor.fetchone())
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a user by user ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a user by email."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE email = ? LIMIT 1", (email.strip().lower(),))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    # ==========================================
+    # Per-User Saved Stories Persistence
+    # ==========================================
+
+    def save_story(self, user_id: str, story_id: str) -> bool:
+        """
+        Saves a story for a specific user. Idempotent.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO user_saved_stories (user_id, story_id, saved_at)
+                VALUES (?, ?, ?)
+            """, (user_id, story_id, now))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def unsave_story(self, user_id: str, story_id: str) -> bool:
+        """Removes a story from a user's saved list."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM user_saved_stories
+                WHERE user_id = ? AND story_id = ?
+            """, (user_id, story_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_saved_story_ids(self, user_id: str = "default_user") -> List[str]:
+        """Returns the list of story IDs saved by a specific user."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT story_id FROM user_saved_stories
+                WHERE user_id = ?
+                ORDER BY saved_at DESC
+            """, (user_id,))
+            return [row["story_id"] for row in cursor.fetchall()]
+
+    def get_saved_stories(self, user_id: str = "default_user", limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Returns full story objects saved by a user, ordered by save time descending.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT s.*, uss.saved_at
+                FROM user_saved_stories uss
+                JOIN stories s ON uss.story_id = s.id
+                WHERE uss.user_id = ?
+                ORDER BY uss.saved_at DESC
+                LIMIT ?
+            """, (user_id, limit))
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                story_dict = dict(row)
+                story_dict["articles"] = self.get_articles_for_story(story_dict["id"])
+                story_dict["is_saved"] = True
+                results.append(story_dict)
+            return results
 
     def clear_pipeline_runs(self):
         """Clears all pipeline runs (used in tests)."""
@@ -1534,6 +2169,9 @@ class DbRepository:
             cursor.execute("DELETE FROM stories")
             cursor.execute("DELETE FROM articles")
             cursor.execute("DELETE FROM user_interactions")
+            cursor.execute("DELETE FROM user_saved_stories")
+            cursor.execute("DELETE FROM user_preferences")
+            cursor.execute("DELETE FROM users")
             cursor.execute("DELETE FROM pipeline_runs")
             conn.commit()
 

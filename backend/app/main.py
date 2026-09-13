@@ -10,10 +10,48 @@ _backend_dir = Path(__file__).resolve().parent.parent
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
 
-from fastapi import FastAPI
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from backend.app.core.config import settings
+from backend.app.core.db_repository import db_repository
 from backend.app.api.api_router import api_router
+from backend.app.services.pipeline_scheduler import pipeline_scheduler
+
+logger = logging.getLogger("pulse.main")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Reconcile orphan pipeline runs left in 'queued' or 'running' state (Phase 9.1 Step 2)
+    try:
+        reconciled = db_repository.reconcile_orphan_pipeline_runs()
+        if reconciled > 0:
+            logger.warning(
+                f"[LIFECYCLE] Reconciled {reconciled} orphan pipeline run(s) left in queued/running status -> marked as interrupted."
+            )
+        else:
+            logger.info("[LIFECYCLE] Startup check: No orphan pipeline runs found to reconcile.")
+    except Exception as e:
+        logger.error(f"[LIFECYCLE] Failed to reconcile orphan pipeline runs on startup: {e}", exc_info=True)
+
+    # Startup: Start automatic pipeline scheduler if enabled
+    if settings.SCHEDULER_ENABLED:
+        logger.info("[LIFECYCLE] Starting Pulse pipeline scheduler...")
+        pipeline_scheduler.start()
+    else:
+        logger.info("[LIFECYCLE] Pulse pipeline scheduler is disabled by configuration.")
+
+    yield
+
+    # Shutdown: Cleanly shut down scheduler
+    if pipeline_scheduler.is_running():
+        logger.info("[LIFECYCLE] Shutting down Pulse pipeline scheduler...")
+        pipeline_scheduler.shutdown(wait=False)
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -25,16 +63,33 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     docs_url=f"{settings.API_V1_STR}/docs",
     redoc_url=f"{settings.API_V1_STR}/redoc",
+    lifespan=lifespan,
 )
 
-# Configure CORS for local development with Vite
+# Configure CORS (disallowing wildcard origin when credentials are enabled)
+cors_origins = [orig for orig in settings.BACKEND_CORS_ORIGINS if orig != "*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS if settings.BACKEND_CORS_ORIGINS else ["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Production error handling: Never leak tracebacks, SQL queries, or internal exceptions
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    if isinstance(exc, (HTTPException, StarletteHTTPException)):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None)
+        )
+    logger.error(f"Unhandled server error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred."}
+    )
 
 # Include core API router under /api
 app.include_router(api_router, prefix=settings.API_V1_STR)
