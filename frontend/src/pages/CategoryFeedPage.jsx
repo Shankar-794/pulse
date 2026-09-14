@@ -43,12 +43,12 @@ const CATEGORY_META = {
   }
 };
 
-export default function CategoryFeedPage() {
+export default function CategoryFeedPage({ category: propCategory }) {
   const { isAuthenticated, openLoginModal } = useAuth();
-  const { category: paramCategory = 'technology' } = useParams();
+  const { category: paramCategory } = useParams();
   const location = useLocation();
   const pathSegment = location.pathname.replace(/^\/+|\/+$/g, '').split('/').pop();
-  const rawKey = paramCategory || pathSegment || '';
+  const rawKey = propCategory || paramCategory || pathSegment || 'technology';
   const categoryKey = rawKey.toLowerCase().trim();
 
   const meta = CATEGORY_META[categoryKey] || {

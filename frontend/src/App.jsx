@@ -28,14 +28,14 @@ export default function App() {
             <Route path="/for-you" element={<ForYouPage />} />
 
             {/* Intelligence Category Feeds */}
-            <Route path="/world" element={<CategoryFeedPage />} />
-            <Route path="/technology" element={<CategoryFeedPage />} />
-            <Route path="/ai" element={<CategoryFeedPage />} />
-            <Route path="/science" element={<CategoryFeedPage />} />
-            <Route path="/business" element={<CategoryFeedPage />} />
-            <Route path="/economy" element={<CategoryFeedPage />} />
-            <Route path="/cybersecurity" element={<CategoryFeedPage />} />
-            <Route path="/space" element={<CategoryFeedPage />} />
+            <Route path="/world" element={<CategoryFeedPage category="world" />} />
+            <Route path="/technology" element={<CategoryFeedPage category="technology" />} />
+            <Route path="/ai" element={<CategoryFeedPage category="ai" />} />
+            <Route path="/science" element={<CategoryFeedPage category="science" />} />
+            <Route path="/business" element={<CategoryFeedPage category="business" />} />
+            <Route path="/economy" element={<CategoryFeedPage category="economy" />} />
+            <Route path="/cybersecurity" element={<CategoryFeedPage category="cybersecurity" />} />
+            <Route path="/space" element={<CategoryFeedPage category="space" />} />
             <Route path="/category/:category" element={<CategoryFeedPage />} />
 
             {/* Story Detail Page */}

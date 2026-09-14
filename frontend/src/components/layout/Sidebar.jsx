@@ -45,10 +45,17 @@ export default function Sidebar({ onCloseMobile }) {
   const { user, isAuthenticated, savedCount, openLoginModal } = useAuth();
 
   const isActiveRoute = (item) => {
-    if (item.to === '/for-you' && (location.pathname === '/' || location.pathname === '/for-you')) {
+    if (item.to === '/for-you') {
+      return location.pathname === '/' || location.pathname === '/for-you';
+    }
+    if (location.pathname === item.to) {
       return true;
     }
-    return location.pathname === item.to;
+    const slug = item.to.replace(/^\//, '');
+    if (location.pathname === `/category/${slug}`) {
+      return true;
+    }
+    return false;
   };
 
   return (
