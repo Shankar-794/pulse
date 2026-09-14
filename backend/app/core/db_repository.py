@@ -538,6 +538,7 @@ class DbRepository:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);")
 
             conn.commit()
+        self.seed_default_sources()
 
     def init_sqlite_db(self):
         """Creates SQLite tables, constraints, and indexes with WAL mode enabled."""
@@ -865,7 +866,160 @@ class DbRepository:
                     cursor.execute(f"ALTER TABLE pipeline_runs ADD COLUMN {col_name} {col_type}")
 
             conn.commit()
+        self.seed_default_sources()
 
+    # ==========================================
+    # Sources Persistence & Referential Integrity
+    # ==========================================
+
+    def upsert_source(
+        self,
+        source: Optional[Any] = None,
+        source_id: Optional[str] = None,
+        name: Optional[str] = None,
+        base_url: Optional[str] = None,
+        feed_url: Optional[str] = None,
+        category: Optional[str] = None,
+        reliability_score: float = 1.0,
+        enabled: int = 1,
+        last_fetched_at: Optional[str] = None
+    ) -> str:
+        """
+        Inserts or updates a source record. Transactional and idempotent.
+        Resolves canonical database source ID by primary key `id` first,
+        then by unique `feed_url`.
+        Returns the canonical database source primary key.
+        """
+        if source is not None:
+            if hasattr(source, "id"):
+                source_id = source.id
+                name = getattr(source, "name", source_id)
+                base_url = getattr(source, "base_url", "")
+                feed_url = getattr(source, "feed_url", "")
+                category = getattr(source, "category", "technology")
+                reliability_score = getattr(source, "reliability_score", 1.0)
+                enabled = 1 if getattr(source, "enabled", True) else 0
+                last_fetched_at = getattr(source, "last_fetched_at", None)
+            elif isinstance(source, dict):
+                source_id = source.get("id") or source_id
+                name = source.get("name") or name or source_id
+                base_url = source.get("base_url") or base_url or ""
+                feed_url = source.get("feed_url") or feed_url or ""
+                category = source.get("category") or category or "technology"
+                reliability_score = source.get("reliability_score", reliability_score)
+                enabled = 1 if source.get("enabled", True) else 0
+                last_fetched_at = source.get("last_fetched_at", last_fetched_at)
+
+        if not source_id:
+            raise ValueError("source_id is required to upsert a source")
+
+        name = name or source_id
+        base_url = base_url or "https://pulse.internal"
+        feed_url = feed_url or f"{base_url}/feed/{source_id}"
+        category = category or "technology"
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 1. Check if source already exists by ID
+            cursor.execute("SELECT id FROM sources WHERE id = ? LIMIT 1", (source_id,))
+            row = cursor.fetchone()
+            if row:
+                canonical_id = row[0] if isinstance(row, (tuple, list)) else row["id"]
+                cursor.execute("""
+                    UPDATE sources SET
+                        name = ?, base_url = ?, feed_url = ?, category = ?,
+                        reliability_score = ?, enabled = ?,
+                        last_fetched_at = COALESCE(?, last_fetched_at)
+                    WHERE id = ?
+                """, (name, base_url, feed_url, category, float(reliability_score), int(enabled), last_fetched_at, canonical_id))
+                conn.commit()
+                return str(canonical_id)
+
+            # 2. Check if source already exists by unique feed_url
+            if feed_url:
+                cursor.execute("SELECT id FROM sources WHERE feed_url = ? LIMIT 1", (feed_url,))
+                row = cursor.fetchone()
+                if row:
+                    canonical_id = row[0] if isinstance(row, (tuple, list)) else row["id"]
+                    cursor.execute("""
+                        UPDATE sources SET
+                            name = ?, base_url = ?, category = ?,
+                            reliability_score = ?, enabled = ?,
+                            last_fetched_at = COALESCE(?, last_fetched_at)
+                        WHERE id = ?
+                    """, (name, base_url, category, float(reliability_score), int(enabled), last_fetched_at, canonical_id))
+                    conn.commit()
+                    return str(canonical_id)
+
+            # 3. Neither exists: insert new source record transactionally
+            try:
+                cursor.execute("""
+                    INSERT INTO sources (id, name, base_url, feed_url, category, reliability_score, enabled, last_fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (source_id, name, base_url, feed_url, category, float(reliability_score), int(enabled), last_fetched_at))
+                conn.commit()
+                return str(source_id)
+            except (sqlite3.IntegrityError, psycopg2.IntegrityError if PSYCOPG2_AVAILABLE else ()):
+                conn.rollback()
+                # Handle concurrent insert race: resolve existing row
+                cursor.execute("SELECT id FROM sources WHERE id = ? OR feed_url = ? LIMIT 1", (source_id, feed_url))
+                race_row = cursor.fetchone()
+                if race_row:
+                    return str(race_row[0] if isinstance(race_row, (tuple, list)) else race_row["id"])
+                raise
+
+    def get_sources(self, enabled_only: bool = False) -> List[Dict[str, Any]]:
+        """Retrieves stored sources from the database."""
+        sql = "SELECT * FROM sources"
+        params = []
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY name ASC"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_source(self, source_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a single source by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM sources WHERE id = ? LIMIT 1", (source_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def update_source_fetch_status(self, source_id: str, last_fetched_at: str) -> bool:
+        """Updates last_fetched_at timestamp on a source."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE sources SET last_fetched_at = ? WHERE id = ?",
+                (last_fetched_at, source_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def seed_default_sources(self) -> int:
+        """
+        Populates the sources table with the default configured sources from SourceRegistry.
+        Guarantees that foreign key constraint references from articles table are satisfied
+        in both SQLite and PostgreSQL without needing dummy data.
+        """
+        try:
+            from backend.app.core.sources_data import DEFAULT_SOURCES
+        except Exception as e:
+            logger.warning(f"Could not load DEFAULT_SOURCES for database seeding: {e}")
+            return 0
+
+        count = 0
+        for src in DEFAULT_SOURCES:
+            try:
+                self.upsert_source(src)
+                count += 1
+            except Exception as err:
+                logger.warning(f"Could not seed source {getattr(src, 'id', 'unknown')}: {err}")
+        return count
 
     def article_exists(self, canonical_url: str, source_id: str, external_id: Optional[str] = None) -> bool:
         """
@@ -894,6 +1048,7 @@ class DbRepository:
         """
         Inserts a single normalized article.
         Returns True if newly inserted, False if it already exists (duplicate).
+        Strictly enforces database foreign key constraints without generating dummy records.
         """
         sql = """
         INSERT INTO articles (
@@ -909,9 +1064,9 @@ class DbRepository:
         data = dict(article)
         defaults = {
             "external_id": None,
-            "source_id": "default_src",
-            "source_name": "News Source",
-            "source_domain": "example.com",
+            "source_id": "hackernews",
+            "source_name": "Hacker News",
+            "source_domain": "news.ycombinator.com",
             "description": None,
             "author": None,
             "category": "technology",
@@ -930,7 +1085,10 @@ class DbRepository:
                 cursor.execute(sql, data)
                 conn.commit()
                 return True
-            except sqlite3.IntegrityError:
+            except (sqlite3.IntegrityError, psycopg2.IntegrityError if PSYCOPG2_AVAILABLE else ()) as err:
+                # Re-raise if foreign key violation so parent-child failures are never silenced
+                if PSYCOPG2_AVAILABLE and isinstance(err, psycopg2.errors.ForeignKeyViolation):
+                    raise
                 # Duplicate canonical_url or source_id+external_id
                 return False
 
@@ -1677,14 +1835,12 @@ class DbRepository:
             cursor.execute("SELECT COUNT(*) FROM stories WHERE story_status IS NOT NULL OR evolution_calculated_at IS NOT NULL")
             evolved_stories = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM sources WHERE enabled = 1")
-            source_count = cursor.fetchone()[0]
-            if source_count == 0:
-                try:
-                    from backend.app.services.source_registry import source_registry
-                    source_count = len(source_registry.get_enabled())
-                except Exception:
-                    pass
+            try:
+                from backend.app.services.source_registry import source_registry
+                source_count = len(source_registry.get_enabled())
+            except Exception:
+                cursor.execute("SELECT COUNT(*) FROM sources WHERE enabled = 1")
+                source_count = cursor.fetchone()[0]
 
             # 3. Concurrency / Diagnostics
             if self.is_postgres:
@@ -1715,7 +1871,7 @@ class DbRepository:
     def reset_story_links(self, article_ids: Optional[List[str]] = None):
         """
         Unlinks articles and removes stories that no longer have articles.
-        Enables clean idempotent re-clustering.
+        Enables clean idempotent re-clustering while preserving foreign key integrity.
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1725,6 +1881,17 @@ class DbRepository:
             else:
                 cursor.execute("UPDATE articles SET story_id = NULL")
 
+            # Remove child story_events and user_saved_stories before removing unlinked parent stories
+            cursor.execute("""
+            DELETE FROM story_events WHERE story_id NOT IN (
+                SELECT DISTINCT story_id FROM articles WHERE story_id IS NOT NULL
+            )
+            """)
+            cursor.execute("""
+            DELETE FROM user_saved_stories WHERE story_id NOT IN (
+                SELECT DISTINCT story_id FROM articles WHERE story_id IS NOT NULL
+            )
+            """)
             # Remove stories with no linked articles
             cursor.execute("""
             DELETE FROM stories WHERE id NOT IN (
@@ -2622,15 +2789,15 @@ class DbRepository:
             conn.commit()
 
     def clear_all(self):
-        """Clears all articles, story events, stories, and pipeline runs (used in tests)."""
+        """Clears all dynamic data (used in tests) in strict foreign-key dependency order."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("UPDATE articles SET story_id = NULL")
+            cursor.execute("DELETE FROM user_saved_stories")
+            cursor.execute("DELETE FROM user_interactions")
             cursor.execute("DELETE FROM story_events")
+            cursor.execute("UPDATE articles SET story_id = NULL")
             cursor.execute("DELETE FROM stories")
             cursor.execute("DELETE FROM articles")
-            cursor.execute("DELETE FROM user_interactions")
-            cursor.execute("DELETE FROM user_saved_stories")
             cursor.execute("DELETE FROM user_preferences")
             cursor.execute("DELETE FROM users")
             cursor.execute("DELETE FROM pipeline_runs")

@@ -45,6 +45,26 @@ class IngestionService:
             print(f"\n[SOURCE] {source.name}")
             logger.info(f"[SOURCE] {source.name}")
 
+            # 1. Guarantee parent source record exists in database before ingesting its articles
+            try:
+                canonical_source_id = self.repo.upsert_source(source)
+                if not canonical_source_id:
+                    raise ValueError(f"upsert_source returned empty canonical ID for {source.id}")
+            except Exception as e:
+                logger.error(f"[SOURCE REGISTRATION FAILED] {source.name} ({source.id}): {e}")
+                self.registry.update_fetch_status(source.id, "failed", 0)
+                failed_sources_count += 1
+                source_breakdowns.append({
+                    "source_id": source.id,
+                    "source_name": source.name,
+                    "seen": 0,
+                    "new": 0,
+                    "duplicates": 0,
+                    "status": "failed",
+                    "error": f"Source registration failed: {e}"
+                })
+                continue
+
             raw_items = await self.fetcher.fetch_source_feed(source)
             if not raw_items:
                 print(f"[SOURCE FAILED] {source.name} returned 0 items or encountered error")
@@ -68,22 +88,28 @@ class IngestionService:
             source_dup = 0
 
             for raw_item in raw_items:
+                # Guarantee canonical source ID is assigned
+                raw_item["source_id"] = canonical_source_id
                 normalized = self.normalizer.normalize_entry(raw_item)
                 if not normalized:
                     continue
+                normalized["source_id"] = canonical_source_id
 
                 is_dup, reason = self.detector.is_duplicate(normalized)
                 if is_dup:
                     source_dup += 1
                     duplicates_count += 1
                 else:
-                    inserted = self.repo.insert_article(normalized)
-                    if inserted:
-                        source_new += 1
-                        new_articles_count += 1
-                    else:
-                        source_dup += 1
-                        duplicates_count += 1
+                    try:
+                        inserted = self.repo.insert_article(normalized)
+                        if inserted:
+                            source_new += 1
+                            new_articles_count += 1
+                        else:
+                            source_dup += 1
+                            duplicates_count += 1
+                    except Exception as art_err:
+                        logger.error(f"[ARTICLE ERROR] Failed to insert article {normalized.get('id')}: {art_err}")
 
             print(f"[NEW] {source_new} articles")
             print(f"[DUPLICATE] {source_dup} articles")

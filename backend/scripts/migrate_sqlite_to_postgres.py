@@ -94,6 +94,21 @@ def migrate(sqlite_path: str, postgres_url: str, batch_size: int = 200) -> bool:
                 logger.info(f"Table '{table}' does not exist in SQLite source. Skipping.")
                 continue
 
+            # Before migrating articles, ensure parent sources from SQLite articles exist in PostgreSQL
+            if table == "articles":
+                try:
+                    cur_sqlite.execute("SELECT DISTINCT source_id, source_name, source_domain, category FROM articles")
+                    for s_row in cur_sqlite.fetchall():
+                        pg_repo.upsert_source(
+                            source_id=s_row["source_id"],
+                            name=s_row["source_name"],
+                            base_url=f"https://{s_row['source_domain']}",
+                            feed_url=f"https://{s_row['source_domain']}/feed/{s_row['source_id']}",
+                            category=s_row["category"] or "technology"
+                        )
+                except Exception as s_err:
+                    logger.warning(f"Could not pre-populate sources for articles migration: {s_err}")
+
             # Count rows in SQLite
             cur_sqlite.execute(f"SELECT COUNT(*) FROM {table}")
             total_source_rows = cur_sqlite.fetchone()[0]
