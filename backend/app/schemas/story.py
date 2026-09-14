@@ -182,3 +182,5 @@ class StoryResponse(StoryBase):
 class StoryListResponse(BaseModel):
     total: int
     items: List[StoryResponse]
+    is_empty: Optional[bool] = False
+    message: Optional[str] = None

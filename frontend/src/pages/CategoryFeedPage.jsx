@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useLocation, useParams } from 'react-router-dom';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
 import NewsCard from '../components/feed/NewsCard';
 import ErrorState from '../components/common/ErrorState';
-import { Filter, Layers } from 'lucide-react';
+import { Filter, Layers, RefreshCw } from 'lucide-react';
 
 const CATEGORY_META = {
   world: {
@@ -42,10 +42,14 @@ const CATEGORY_META = {
 };
 
 export default function CategoryFeedPage() {
+  const { category: paramCategory } = useParams();
   const location = useLocation();
-  const categoryKey = location.pathname.replace('/', '').toLowerCase();
+  const pathSegment = location.pathname.replace(/^\/+|\/+$/g, '').split('/').pop();
+  const rawKey = paramCategory || pathSegment || '';
+  const categoryKey = rawKey.toLowerCase().trim();
+
   const meta = CATEGORY_META[categoryKey] || {
-    title: categoryKey.charAt(0).toUpperCase() + categoryKey.slice(1),
+    title: categoryKey ? categoryKey.charAt(0).toUpperCase() + categoryKey.slice(1) : 'News Stream',
     description: 'Curated stories and reporting in this domain.'
   };
 
@@ -54,22 +58,47 @@ export default function CategoryFeedPage() {
   const [error, setError] = useState(false);
   const [minImportance, setMinImportance] = useState(0);
 
-  const loadCategoryFeed = async () => {
+  const loadCategoryFeed = useCallback(async () => {
+    if (!categoryKey) return;
     setLoading(true);
     setError(false);
     try {
       const data = await ApiService.getStories({ category: categoryKey });
-      setStories(data.items || []);
+      setStories(data?.items || []);
     } catch {
       setError(true);
     } finally {
       setLoading(false);
     }
-  };
+  }, [categoryKey]);
 
   useEffect(() => {
     loadCategoryFeed();
-  }, [categoryKey]);
+
+    const handlePipelineCompleted = () => {
+      loadCategoryFeed();
+    };
+
+    const handleSavedUpdated = ({ detail }) => {
+      setStories((prev) =>
+        prev.map((s) => (s.id === detail.storyId ? { ...s, is_saved: detail.isSaved } : s))
+      );
+    };
+
+    const handleHiddenUpdated = ({ detail }) => {
+      setStories((prev) => prev.filter((s) => s.id !== detail.storyId));
+    };
+
+    window.addEventListener('pulse_pipeline_completed', handlePipelineCompleted);
+    window.addEventListener('pulse_saved_updated', handleSavedUpdated);
+    window.addEventListener('pulse_hidden_updated', handleHiddenUpdated);
+
+    return () => {
+      window.removeEventListener('pulse_pipeline_completed', handlePipelineCompleted);
+      window.removeEventListener('pulse_saved_updated', handleSavedUpdated);
+      window.removeEventListener('pulse_hidden_updated', handleHiddenUpdated);
+    };
+  }, [loadCategoryFeed]);
 
   const handleSaveToggle = async (storyId) => {
     if (localStorage.getItem('pulse_auth_token')) {
@@ -104,20 +133,33 @@ export default function CategoryFeedPage() {
     <div className="space-y-6">
       {/* Editorial Header */}
       <div className="bg-news-surface border border-news-border rounded-xl p-6 sm:p-7 shadow-card">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
-            Section
-          </span>
-          <span className="text-xs text-news-text-secondary">
-            · {filteredStories.length} {filteredStories.length === 1 ? 'story' : 'stories'}
-          </span>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                Section
+              </span>
+              <span className="text-xs text-news-text-secondary">
+                · {filteredStories.length} {filteredStories.length === 1 ? 'story' : 'stories'}
+              </span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-bold font-sans text-news-text-primary mb-2">
+              {meta.title}
+            </h1>
+            <p className="text-sm text-news-text-secondary max-w-3xl leading-relaxed">
+              {meta.description}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => loadCategoryFeed()}
+            disabled={loading}
+            className="inline-flex items-center gap-2 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-news-text-primary text-xs font-semibold rounded-lg transition-colors self-start sm:self-auto shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <span>{loading ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
         </div>
-        <h1 className="text-2xl sm:text-3xl font-bold font-sans text-news-text-primary mb-2">
-          {meta.title}
-        </h1>
-        <p className="text-sm text-news-text-secondary max-w-3xl leading-relaxed">
-          {meta.description}
-        </p>
 
         {/* Filter Pills */}
         <div className="mt-5 pt-4 border-t border-news-border flex items-center justify-between gap-4 flex-wrap text-xs">

@@ -42,6 +42,21 @@ async def lifespan(app: FastAPI):
     if settings.SCHEDULER_ENABLED:
         logger.info("[LIFECYCLE] Starting Pulse pipeline scheduler...")
         pipeline_scheduler.start()
+
+        # Startup: If database is completely empty and not in test suite, trigger initial ingestion in background thread
+        is_test_env = "pytest" in sys.modules or os.getenv("ENVIRONMENT", "").lower() in ("test", "testing")
+        if not is_test_env and getattr(settings, "AUTO_INGEST_ON_EMPTY_STARTUP", True):
+            try:
+                if db_repository.get_total_count() == 0 and db_repository.get_total_story_count() == 0:
+                    logger.info("[LIFECYCLE] Database is empty on startup. Triggering initial ingestion & pipeline execution in background thread...")
+                    import threading
+                    threading.Thread(
+                        target=pipeline_scheduler.execute_tick,
+                        name="PulseInitialIngestionThread",
+                        daemon=True
+                    ).start()
+            except Exception as e:
+                logger.warning(f"[LIFECYCLE] Could not check or trigger startup ingestion: {e}")
     else:
         logger.info("[LIFECYCLE] Pulse pipeline scheduler is disabled by configuration.")
 

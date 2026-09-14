@@ -93,18 +93,21 @@ try:
         def assemble_cors_origins(cls, v: Any) -> List[str]:
             return _parse_cors_origins(v)
         
-        # PostgreSQL Connection Config
-        DATABASE_URL: str = os.getenv(
-            "DATABASE_URL",
-            "postgresql+asyncpg://pulse_user:pulse_password@localhost:5432/pulse_intelligence"
-        )
-        USE_IN_MEMORY_STORE: bool = True
+        # PostgreSQL Connection Config (Production on Render)
+        DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL") or None
+        USE_IN_MEMORY_STORE: bool = False
+
+        @property
+        def is_postgres_enabled(self) -> bool:
+            url = (self.DATABASE_URL or "").strip().lower()
+            return url.startswith("postgres://") or url.startswith("postgresql://") or url.startswith("postgresql+")
 
         # SQLite Concurrency & Hardening (Phase 9 Step 1)
         SQLITE_DB_PATH: Optional[str] = os.getenv("SQLITE_DB_PATH", None)
         SQLITE_BUSY_TIMEOUT_MS: int = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000"))
         SQLITE_WAL_MODE: bool = os.getenv("SQLITE_WAL_MODE", "true").lower() in ("true", "1", "yes")
         SQLITE_SYNCHRONOUS: str = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")
+        AUTO_INGEST_ON_EMPTY_STARTUP: bool = os.getenv("AUTO_INGEST_ON_EMPTY_STARTUP", "true").lower() in ("true", "1", "yes")
         
         # Intelligence Pipeline Defaults
         BREAKING_NEWS_IMPORTANCE_THRESHOLD: int = 85
@@ -275,14 +278,18 @@ except Exception:
         ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
         DEBUG: bool = _is_debug_enabled()
         BACKEND_CORS_ORIGINS: List[str] = _parse_cors_origins()
-        DATABASE_URL: str = os.getenv(
-            "DATABASE_URL",
-            "postgresql+asyncpg://pulse_user:pulse_password@localhost:5432/pulse_intelligence"
-        )
-        USE_IN_MEMORY_STORE: bool = True
+        DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL") or None
+        USE_IN_MEMORY_STORE: bool = False
+
+        @property
+        def is_postgres_enabled(self) -> bool:
+            url = (self.DATABASE_URL or "").strip().lower()
+            return url.startswith("postgres://") or url.startswith("postgresql://") or url.startswith("postgresql+")
+        SQLITE_DB_PATH: Optional[str] = os.getenv("SQLITE_DB_PATH", None)
         SQLITE_BUSY_TIMEOUT_MS: int = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000"))
         SQLITE_WAL_MODE: bool = os.getenv("SQLITE_WAL_MODE", "true").lower() in ("true", "1", "yes")
         SQLITE_SYNCHRONOUS: str = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL")
+        AUTO_INGEST_ON_EMPTY_STARTUP: bool = os.getenv("AUTO_INGEST_ON_EMPTY_STARTUP", "true").lower() in ("true", "1", "yes")
         BREAKING_NEWS_IMPORTANCE_THRESHOLD: int = 85
         DEFAULT_IMPORTANCE_FILTER: int = 50
         DEFAULT_USER_INTERESTS: List[str] = [

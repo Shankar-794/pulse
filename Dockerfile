@@ -5,7 +5,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    PORT=8000
+    PORT=8000 \
+    SQLITE_DB_PATH=/app/data/pulse.db
 
 # Install curl for container healthcheck and clean apt caches
 RUN apt-get update && \

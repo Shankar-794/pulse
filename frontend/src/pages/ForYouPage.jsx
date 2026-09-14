@@ -19,12 +19,13 @@ export default function ForYouPage() {
     setHasError(false);
     try {
       const data = await ApiService.getFeed();
-      if (data.is_empty) {
+      const items = data?.items || [];
+      if (data?.is_empty || items.length === 0) {
         setIsEmpty(true);
         setStories([]);
       } else {
         setIsEmpty(false);
-        setStories(data.items || []);
+        setStories(items);
       }
     } catch {
       setHasError(true);
@@ -33,9 +34,12 @@ export default function ForYouPage() {
     }
   };
 
-
   useEffect(() => {
     loadFeed();
+
+    const handlePipelineCompleted = () => {
+      loadFeed();
+    };
 
     const handleSavedUpdated = ({ detail }) => {
       setStories((prev) =>
@@ -47,10 +51,12 @@ export default function ForYouPage() {
       setStories((prev) => prev.filter((s) => s.id !== detail.storyId));
     };
 
+    window.addEventListener('pulse_pipeline_completed', handlePipelineCompleted);
     window.addEventListener('pulse_saved_updated', handleSavedUpdated);
     window.addEventListener('pulse_hidden_updated', handleHiddenUpdated);
 
     return () => {
+      window.removeEventListener('pulse_pipeline_completed', handlePipelineCompleted);
       window.removeEventListener('pulse_saved_updated', handleSavedUpdated);
       window.removeEventListener('pulse_hidden_updated', handleHiddenUpdated);
     };

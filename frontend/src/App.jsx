@@ -36,6 +36,7 @@ export default function App() {
             <Route path="/economy" element={<CategoryFeedPage />} />
             <Route path="/cybersecurity" element={<CategoryFeedPage />} />
             <Route path="/space" element={<CategoryFeedPage />} />
+            <Route path="/category/:category" element={<CategoryFeedPage />} />
 
             {/* Story Detail Page */}
             <Route path="/story/:id" element={<StoryDetailPage />} />

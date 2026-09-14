@@ -52,6 +52,11 @@ class BehavioralLearningService:
         # 2. Retrieve story context to extract topics, category, and entities
         story = db_repository.get_story(story_id)
         if not story:
+            art = db_repository.get_article_by_id(story_id)
+            if art:
+                from backend.app.api.endpoints.stories import article_to_story
+                story = article_to_story(art)
+        if not story:
             from backend.app.services.news_service import news_service
             story = news_service.get_story_by_id(story_id)
 

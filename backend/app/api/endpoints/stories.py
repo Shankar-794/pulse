@@ -340,14 +340,29 @@ async def get_personalized_feed(
     limit: int = Query(50, ge=1, le=100, description="Max stories to return"),
     offset: int = Query(0, ge=0, description="Stories offset for pagination"),
     user_id: Optional[str] = Query(None, description="Target user identifier"),
+    category: Optional[str] = Query(None, description="Filter by category e.g. 'ai', 'technology', 'world', 'business', 'economy'"),
     user: Optional[Dict[str, Any]] = Depends(get_optional_user)
 ):
     """
     Returns personalized ranked feed balancing personal relevance, global importance,
     freshness, urgency, and category diversity interleaving.
+    Operates strictly against the authoritative database.
     """
     effective_user_id = user["id"] if user else (user_id or "default_user")
-    ranked_stories = feed_ranking_service.rank_feed(user_id=effective_user_id, limit=limit, offset=offset)
+    ranked_stories = feed_ranking_service.rank_feed(
+        user_id=effective_user_id,
+        limit=limit,
+        offset=offset,
+        category=category
+    )
+    if not ranked_stories:
+        return {
+            "total": 0,
+            "items": [],
+            "is_empty": True,
+            "message": "No news articles ingested yet. Trigger an ingestion cycle via POST /api/ingestion/run or the UI 'Sync Sources' button."
+        }
+
     saved_ids = set(db_repository.get_saved_story_ids(effective_user_id)) if user else set()
     for s in ranked_stories:
         if isinstance(s, dict):
@@ -356,7 +371,8 @@ async def get_personalized_feed(
             s.is_saved = s.id in saved_ids
     return {
         "total": len(ranked_stories),
-        "items": ranked_stories
+        "items": ranked_stories,
+        "is_empty": False
     }
 
 
@@ -374,7 +390,7 @@ async def get_stories(
     """
     Retrieve news stories.
     Surfaces real clustered stories from the database.
-    Falls back gracefully to individual articles or mock service if not yet clustered.
+    Falls back gracefully to individual articles if not yet clustered.
     """
     total_articles = db_repository.get_total_count()
     total_stories = db_repository.get_total_story_count()
@@ -415,6 +431,14 @@ async def get_stories(
             limit=100
         )
         stories = [format_db_story(s, saved_ids=saved_ids) for s in raw_stories]
+        if not stories and category:
+            # Fallback to unclustered articles for this category if no clustered stories exist for it
+            unclustered = db_repository.get_articles(
+                category=category,
+                search=search,
+                limit=100
+            )
+            stories = [article_to_story(art, saved_ids=saved_ids) for art in unclustered]
     else:
         # Fallback to unclustered articles
         real_articles = db_repository.get_articles(
@@ -460,6 +484,10 @@ async def get_story_relevance_breakdown(
     was scored and ranked for the user.
     """
     story = db_repository.get_story(story_id)
+    if not story:
+        art = db_repository.get_article_by_id(story_id)
+        if art:
+            story = article_to_story(art)
     if not story:
         story = news_service.get_story_by_id(story_id)
     if not story:

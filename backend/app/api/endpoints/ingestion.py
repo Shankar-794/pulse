@@ -10,9 +10,17 @@ router = APIRouter(prefix="/ingestion", tags=["ingestion"])
 async def run_ingestion() -> Dict[str, Any]:
     """
     Trigger a manual news ingestion cycle across all enabled registered sources.
-    Fetches real RSS feeds, normalizes articles, filters duplicates, and stores new articles.
+    Fetches real RSS feeds, normalizes articles, filters duplicates, stores new articles,
+    and clusters articles into authoritative canonical stories.
     """
     summary = await ingestion_service.run_ingestion_cycle()
+    try:
+        from backend.app.services.clustering_service import clustering_service
+        clustering_metrics = clustering_service.run_clustering()
+        summary["clustering"] = clustering_metrics
+    except Exception as e:
+        import logging
+        logging.getLogger("pulse.api.ingestion").warning(f"Clustering following ingestion encountered an error: {e}")
     return summary
 
 @router.get("/sources")

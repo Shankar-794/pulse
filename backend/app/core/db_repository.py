@@ -1,24 +1,76 @@
 """
 Database Repository for Pulse News Intelligence.
-Provides reliable relational storage for sources and ingested articles.
-Uses SQLite by default for zero-friction local development, with schema
-and query design 100% compatible with PostgreSQL.
+Provides reliable relational storage for sources, ingested articles, and stories.
+Supports PostgreSQL for persistent production deployments (e.g. Render),
+and SQLite for zero-friction local development and testing.
 """
 import os
+import re
 import json
 import uuid
 import sqlite3
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from pathlib import Path
 from backend.app.core.config import settings
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    import psycopg2.pool
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    psycopg2 = None
+    PSYCOPG2_AVAILABLE = False
+
 logger = logging.getLogger("pulse.db.repository")
 
 DB_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SQLITE_PATH = DB_DIR / "pulse.db"
+
+
+def normalize_postgres_url(raw_url: str) -> str:
+    """
+    Normalizes PostgreSQL connection string for psycopg2:
+    - Replaces protocol prefixes ('postgres://', 'postgresql+asyncpg://') with 'postgresql://'
+    - Ensures sslmode=require for remote hosts (Render requirement) while leaving localhost unforced.
+    """
+    if not raw_url:
+        return ""
+    url = raw_url.strip()
+    clean = re.sub(r"^postgres(ql)?(\+[a-zA-Z0-9_]+)?://", "postgresql://", url)
+    if "sslmode" not in clean and "@localhost" not in clean and "@127.0.0.1" not in clean:
+        sep = "&" if "?" in clean else "?"
+        clean = f"{clean}{sep}sslmode=require"
+    return clean
+
+
+def adapt_query_for_postgres(query: str, params: Any = None) -> str:
+    """
+    Translates SQLite parameter placeholders and pseudo-columns to PostgreSQL format:
+    1. Replaces SQLite 'rowid' with portable primary key 'run_id'
+    2. Converts SQLite 'INSERT OR IGNORE INTO' to 'INSERT INTO ... ON CONFLICT DO NOTHING'
+    3. If params is a dict: converts named :param_name to %(param_name)s
+    4. If params is a sequence or None: converts ? to %s
+    """
+    # Replace rowid with run_id
+    adapted = re.sub(r'\browid\b', 'run_id', query, flags=re.IGNORECASE)
+
+    # Convert INSERT OR IGNORE INTO to INSERT INTO ... ON CONFLICT DO NOTHING
+    if re.search(r'\bINSERT\s+OR\s+IGNORE\s+INTO\b', adapted, flags=re.IGNORECASE):
+        adapted = re.sub(r'\bINSERT\s+OR\s+IGNORE\s+INTO\b', 'INSERT INTO', adapted, flags=re.IGNORECASE)
+        if "ON CONFLICT" not in adapted.upper():
+            adapted = adapted.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING;"
+
+    if isinstance(params, dict):
+        # Convert :name to %(name)s when not preceded by another colon
+        adapted = re.sub(r'(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)', r'%(\1)s', adapted)
+    else:
+        adapted = adapted.replace('?', '%s')
+
+    return adapted
 
 
 class HardenedSQLiteConnection:
@@ -46,16 +98,147 @@ class HardenedSQLiteConnection:
         return getattr(self._raw_conn, name)
 
 
-class DbRepository:
-    def __init__(self, db_path: Optional[str] = None):
-        configured_path = db_path or getattr(settings, "SQLITE_DB_PATH", None) or os.getenv("SQLITE_DB_PATH")
-        self.db_path = str(configured_path) if configured_path else str(DEFAULT_SQLITE_PATH)
-        if self.db_path != ":memory:" and not self.db_path.startswith("file:"):
+class HardenedPostgresCursor:
+    """
+    Cursor proxy that automatically adapts queries from SQLite placeholders (? / :param)
+    to PostgreSQL placeholders (%s / %(param)s).
+    """
+    def __init__(self, raw_cursor):
+        self._raw_cursor = raw_cursor
+
+    def execute(self, query: str, params: Any = None):
+        adapted = adapt_query_for_postgres(query, params)
+        if params is not None:
+            return self._raw_cursor.execute(adapted, params)
+        return self._raw_cursor.execute(adapted)
+
+    def executemany(self, query: str, params_seq: Any):
+        first_item = params_seq[0] if params_seq else None
+        adapted = adapt_query_for_postgres(query, first_item)
+        return self._raw_cursor.executemany(adapted, params_seq)
+
+    def fetchone(self):
+        return self._raw_cursor.fetchone()
+
+    def fetchall(self):
+        return self._raw_cursor.fetchall()
+
+    def fetchmany(self, size=None):
+        return self._raw_cursor.fetchmany(size)
+
+    @property
+    def rowcount(self):
+        return self._raw_cursor.rowcount
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw_cursor, name)
+
+
+class HardenedPostgresConnection:
+    """
+    Context manager and connection proxy for PostgreSQL with automatic commit/rollback
+    and connection pooling integration.
+    """
+    def __init__(self, raw_conn, pool=None):
+        self._raw_conn = raw_conn
+        self._pool = pool
+
+    def cursor(self):
+        return HardenedPostgresCursor(
+            self._raw_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        )
+
+    def execute(self, query: str, params: Any = None):
+        cur = self.cursor()
+        cur.execute(query, params)
+        return cur
+
+    def commit(self):
+        self._raw_conn.commit()
+
+    def rollback(self):
+        self._raw_conn.rollback()
+
+    def close(self):
+        if self._pool is not None:
             try:
-                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                logger.warning(f"Could not create parent directory for SQLite DB {self.db_path}: {e}")
+                self._pool.putconn(self._raw_conn)
+            except Exception:
+                self._raw_conn.close()
+        else:
+            self._raw_conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is not None:
+                self.rollback()
+            else:
+                self.commit()
+        finally:
+            self.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw_conn, name)
+
+
+class DbRepository:
+    def __init__(self, db_path: Optional[str] = None, postgres_url: Optional[str] = None):
+        explicit_sqlite = db_path is not None and (":memory:" in db_path or db_path.endswith(".db") or db_path.endswith(".sqlite"))
+        env_pg_url = postgres_url or (getattr(settings, "DATABASE_URL", None) if not explicit_sqlite else None)
+
+        if env_pg_url and not explicit_sqlite:
+            self.is_postgres = True
+            self.pg_url = normalize_postgres_url(env_pg_url)
+            self.db_path = None
+            self._pg_pool = None
+            self._init_pg_pool()
+        else:
+            self.is_postgres = False
+            self.pg_url = None
+            self._pg_pool = None
+            configured_path = db_path or getattr(settings, "SQLITE_DB_PATH", None) or os.getenv("SQLITE_DB_PATH")
+            self.db_path = str(configured_path) if configured_path else str(DEFAULT_SQLITE_PATH)
+            if self.db_path != ":memory:" and not self.db_path.startswith("file:"):
+                try:
+                    Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    logger.warning(f"Could not create parent directory for SQLite DB {self.db_path}: {e}")
+
         self.init_db()
+
+    def _init_pg_pool(self):
+        if not PSYCOPG2_AVAILABLE:
+            logger.warning("psycopg2 is not installed; PostgreSQL pooling unavailable.")
+            return
+        try:
+            self._pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=20,
+                dsn=self.pg_url
+            )
+            logger.info("Initialized PostgreSQL connection pool successfully.")
+        except Exception as err:
+            logger.error(f"Failed to initialize PostgreSQL connection pool: {err}")
+            self._pg_pool = None
+
+    def _get_pg_connection(self) -> HardenedPostgresConnection:
+        if not PSYCOPG2_AVAILABLE:
+            raise RuntimeError("PostgreSQL driver 'psycopg2' is not installed. Install psycopg2-binary to use PostgreSQL.")
+        if self._pg_pool is None:
+            self._init_pg_pool()
+        if self._pg_pool is not None:
+            try:
+                raw_conn = self._pg_pool.getconn()
+                raw_conn.autocommit = False
+                return HardenedPostgresConnection(raw_conn, pool=self._pg_pool)
+            except Exception as err:
+                logger.error(f"Pool connection failed, falling back to direct connection: {err}")
+        raw_conn = psycopg2.connect(self.pg_url)
+        raw_conn.autocommit = False
+        return HardenedPostgresConnection(raw_conn, pool=None)
 
     def _create_raw_connection(self) -> sqlite3.Connection:
         """
@@ -80,18 +263,35 @@ class DbRepository:
 
         return conn
 
-    def _get_connection(self) -> HardenedSQLiteConnection:
+    def _get_connection(self):
         """
         Provides a hardened connection with deterministic transaction boundaries
         and guaranteed connection cleanup upon context exit.
         """
+        if self.is_postgres:
+            return self._get_pg_connection()
         raw_conn = self._create_raw_connection()
         return HardenedSQLiteConnection(raw_conn)
 
     def get_db_diagnostics(self) -> Dict[str, Any]:
         """
-        Returns runtime SQLite concurrency diagnostics and pragma states (Phase 9 Step 1).
+        Returns runtime database diagnostics for SQLite or PostgreSQL.
         """
+        if self.is_postgres:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT version();")
+                ver_row = cursor.fetchone()
+                cursor.execute("SELECT current_database();")
+                db_row = cursor.fetchone()
+                return {
+                    "engine": "postgresql",
+                    "database_name": db_row[0] if db_row else "unknown",
+                    "server_version": str(ver_row[0]) if ver_row else "unknown",
+                    "pool_available": self._pg_pool is not None,
+                    "is_wal_mode": False
+                }
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             jm = cursor.execute("PRAGMA journal_mode;").fetchone()
@@ -100,6 +300,7 @@ class DbRepository:
             cs = cursor.execute("PRAGMA cache_size;").fetchone()
             ts = cursor.execute("PRAGMA temp_store;").fetchone()
             return {
+                "engine": "sqlite",
                 "db_path": str(self.db_path),
                 "is_wal_mode": bool(jm and str(jm[0]).lower() == "wal"),
                 "journal_mode": jm[0] if jm else "unknown",
@@ -110,7 +311,236 @@ class DbRepository:
             }
 
     def init_db(self):
-        """Creates tables, constraints, and indexes with WAL mode enabled."""
+        """Initializes database schema for PostgreSQL or SQLite."""
+        if self.is_postgres:
+            self.init_pg_db()
+        else:
+            self.init_sqlite_db()
+
+    def init_pg_db(self):
+        """
+        Creates PostgreSQL tables, constraints, and indexes.
+        Idempotent schema initialization suitable for Render PostgreSQL deployments.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 1. Sources table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sources (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                feed_url TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL,
+                reliability_score REAL DEFAULT 1.0,
+                enabled INTEGER DEFAULT 1,
+                last_fetched_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # 2. Stories table (created before articles to ensure foreign keys resolve)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stories (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT,
+                why_it_matters TEXT,
+                category TEXT NOT NULL,
+                primary_topic TEXT DEFAULT 'Technology',
+                importance_score INTEGER DEFAULT 50,
+                relevance_score INTEGER DEFAULT 50,
+                freshness_score INTEGER DEFAULT 100,
+                source_count INTEGER DEFAULT 1,
+                article_count INTEGER DEFAULT 1,
+                first_published_at TEXT,
+                last_published_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                ai_title TEXT,
+                ai_summary TEXT,
+                ai_category TEXT,
+                entities_json TEXT,
+                topics_json TEXT,
+                analysis_confidence REAL,
+                analyzed_at TEXT,
+                analysis_version TEXT,
+                claims_json TEXT,
+                severity_score REAL,
+                reach_score REAL,
+                impact_score REAL,
+                urgency_score REAL,
+                novelty_score REAL,
+                escalation_score REAL,
+                reporting_breadth_score REAL,
+                importance_tier TEXT,
+                importance_explanation TEXT,
+                importance_version TEXT,
+                importance_calculated_at TEXT,
+                relevance_reason TEXT,
+                relevance_calculated_at TEXT,
+                relevance_version TEXT,
+                story_status TEXT DEFAULT 'ACTIVE',
+                breaking_score INTEGER DEFAULT 30,
+                breaking_level TEXT DEFAULT 'STABLE',
+                latest_development TEXT,
+                latest_updated_at TEXT,
+                update_count INTEGER DEFAULT 0,
+                perspectives_json TEXT,
+                evolution_version TEXT,
+                evolution_calculated_at TEXT
+            );
+            """)
+
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stories_category ON stories(category);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stories_updated_at ON stories(updated_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stories_importance ON stories(importance_score DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stories_analyzed_at ON stories(analyzed_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stories_status ON stories(story_status);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stories_breaking ON stories(breaking_score DESC);")
+
+            # 3. Articles table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS articles (
+                id TEXT PRIMARY KEY,
+                external_id TEXT,
+                source_id TEXT NOT NULL REFERENCES sources(id),
+                source_name TEXT NOT NULL,
+                source_domain TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                url TEXT NOT NULL,
+                canonical_url TEXT NOT NULL,
+                author TEXT,
+                category TEXT NOT NULL,
+                primary_topic TEXT DEFAULT 'Technology',
+                image_url TEXT,
+                published_at TEXT NOT NULL,
+                raw_content_hash TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                story_id TEXT REFERENCES stories(id)
+            );
+            """)
+
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_canonical_url ON articles(canonical_url);")
+            cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_source_ext_id
+            ON articles(source_id, external_id)
+            WHERE external_id IS NOT NULL AND external_id != '';
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_articles_category ON articles(category);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_articles_story_id ON articles(story_id);")
+
+            # 4. Story Events table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS story_events (
+                id TEXT PRIMARY KEY,
+                story_id TEXT NOT NULL REFERENCES stories(id),
+                event_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                article_ids_json TEXT NOT NULL,
+                occurred_at TEXT,
+                detected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                significance REAL DEFAULT 0.5,
+                event_version TEXT DEFAULT 'v1'
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_story_events_story_id ON story_events(story_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_story_events_detected_at ON story_events(detected_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_story_events_occurred_at ON story_events(occurred_at DESC);")
+
+            # 5. User Preferences table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id TEXT PRIMARY KEY,
+                interests_json TEXT,
+                interest_weights_json TEXT,
+                topic_affinities_json TEXT,
+                entity_affinities_json TEXT,
+                breaking_sensitivity TEXT DEFAULT 'standard',
+                importance_threshold INTEGER DEFAULT 50,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # 6. User Interactions table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_interactions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                story_id TEXT NOT NULL,
+                interaction_type TEXT NOT NULL,
+                metadata_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_interactions_user_story ON user_interactions(user_id, story_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_interactions_created_at ON user_interactions(created_at DESC);")
+
+            # 7. Users table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                full_name TEXT,
+                picture_url TEXT,
+                oauth_provider TEXT DEFAULT 'google',
+                oauth_sub TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_oauth_sub ON users(oauth_sub);")
+
+            # 8. User Saved Stories table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_saved_stories (
+                user_id TEXT NOT NULL,
+                story_id TEXT NOT NULL REFERENCES stories(id),
+                saved_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, story_id)
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_stories_user ON user_saved_stories(user_id, saved_at DESC);")
+
+            # 9. Pipeline Runs table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
+                run_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                duration_seconds REAL,
+                trigger_type TEXT DEFAULT 'manual',
+                user_id TEXT DEFAULT 'default_user',
+                skip_ingestion INTEGER DEFAULT 0,
+                total_articles INTEGER DEFAULT 0,
+                new_articles INTEGER DEFAULT 0,
+                total_stories INTEGER DEFAULT 0,
+                stories_created INTEGER DEFAULT 0,
+                stories_analyzed INTEGER DEFAULT 0,
+                stories_scored INTEGER DEFAULT 0,
+                stories_evolved INTEGER DEFAULT 0,
+                feed_items INTEGER DEFAULT 0,
+                failed_stages TEXT DEFAULT '[]',
+                error_message TEXT,
+                stage_metrics_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_heartbeat_at TEXT
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_created_at ON pipeline_runs(created_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_at ON pipeline_runs(started_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);")
+
+            conn.commit()
+
+    def init_sqlite_db(self):
+        """Creates SQLite tables, constraints, and indexes with WAL mode enabled."""
         # For disk databases, explicitly set WAL mode and pragmas on initialization
         is_disk_db = self.db_path != ":memory:" and not self.db_path.startswith("file:")
         if is_disk_db and getattr(settings, "SQLITE_WAL_MODE", True):
@@ -571,11 +1001,20 @@ class DbRepository:
             if not max_pub:
                 return []
 
+            # Compute cutoff in Python to ensure identical behavior on SQLite and PostgreSQL
+            try:
+                anchor_str = str(max_pub).replace("Z", "+00:00")
+                anchor_dt = datetime.fromisoformat(anchor_str)
+                cutoff_dt = anchor_dt - timedelta(hours=hours)
+                cutoff_iso = cutoff_dt.isoformat()
+            except Exception:
+                cutoff_iso = str(max_pub)
+
             query = """
             SELECT * FROM articles
-            WHERE published_at >= datetime(?, '-' || ? || ' hours')
+            WHERE published_at >= ?
             """
-            params: List[Any] = [max_pub, hours]
+            params: List[Any] = [cutoff_iso]
 
             if category:
                 query += " AND LOWER(category) = LOWER(?)"
@@ -1247,16 +1686,24 @@ class DbRepository:
                 except Exception:
                     pass
 
-            # 3. Concurrency / WAL diagnostics
-            jm = cursor.execute("PRAGMA journal_mode;").fetchone()
-            bt = cursor.execute("PRAGMA busy_timeout;").fetchone()
-            wal_active = bool(jm and str(jm[0]).lower() == "wal")
+            # 3. Concurrency / Diagnostics
+            if self.is_postgres:
+                wal_active = False
+                journal_mode = "postgres"
+                busy_timeout_ms = 0
+            else:
+                jm = cursor.execute("PRAGMA journal_mode;").fetchone()
+                bt = cursor.execute("PRAGMA busy_timeout;").fetchone()
+                wal_active = bool(jm and str(jm[0]).lower() == "wal")
+                journal_mode = jm[0] if jm else "unknown"
+                busy_timeout_ms = bt[0] if bt else 0
 
             return {
                 "database_healthy": db_healthy,
+                "engine": "postgresql" if self.is_postgres else "sqlite",
                 "wal_mode_active": wal_active,
-                "journal_mode": jm[0] if jm else "unknown",
-                "busy_timeout_ms": bt[0] if bt else 0,
+                "journal_mode": journal_mode,
+                "busy_timeout_ms": busy_timeout_ms,
                 "total_articles": total_articles,
                 "total_stories": total_stories,
                 "analyzed_stories": analyzed_stories,
@@ -1622,7 +2069,7 @@ class DbRepository:
         """
         Retrieves any currently active pipeline run (status in 'queued' or 'running').
         """
-        sql = "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        sql = "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, run_id DESC LIMIT 1"
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(sql)
@@ -1637,14 +2084,14 @@ class DbRepository:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Atomically checks and acquires an active pipeline run slot using SQLite BEGIN IMMEDIATE (Phase 9.1 Step 3).
+        Atomically checks and acquires an active pipeline run slot using SQLite BEGIN IMMEDIATE or PostgreSQL transaction.
         Serializes acquisition across concurrent processes/threads:
         1. Acquires immediate write transaction lock.
         2. Checks whether a pipeline run with status 'queued' or 'running' exists.
         3. If an active run exists, immediately rolls back and returns rejection with active run metadata.
         4. If no active run exists, inserts the new run record in 'queued' status within the same transaction,
            commits atomically, and returns success confirmation with the created run record.
-        Rolls back on error and guarantees connection closure via HardenedSQLiteConnection.
+        Rolls back on error and guarantees connection closure.
         """
         params = dict(run_data or {})
         params.update(kwargs)
@@ -1712,10 +2159,11 @@ class DbRepository:
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE;")
+            if not self.is_postgres:
+                cursor.execute("BEGIN IMMEDIATE;")
 
             cursor.execute(
-                "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, run_id DESC LIMIT 1"
             )
             existing_row = cursor.fetchone()
             if existing_row:
@@ -1784,7 +2232,7 @@ class DbRepository:
                 )
             else:
                 cursor.execute(
-                    "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                    "SELECT * FROM pipeline_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC, run_id DESC LIMIT 1"
                 )
             row = cursor.fetchone()
             if not row:
@@ -1930,7 +2378,7 @@ class DbRepository:
         """
         Retrieves the most recent pipeline execution.
         """
-        sql = "SELECT * FROM pipeline_runs ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        sql = "SELECT * FROM pipeline_runs ORDER BY created_at DESC, run_id DESC LIMIT 1"
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(sql)
@@ -1959,7 +2407,7 @@ class DbRepository:
             params.append(trigger_type)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        sql += " ORDER BY created_at DESC, run_id DESC LIMIT ?"
         params.append(limit)
 
         with self._get_connection() as conn:
@@ -1979,7 +2427,7 @@ class DbRepository:
                 SELECT status, completed_at, started_at, error_message, stage_metrics_json
                 FROM pipeline_runs
                 WHERE status IN ('success', 'partial_failure', 'failed')
-                ORDER BY created_at DESC, rowid DESC
+                ORDER BY created_at DESC, run_id DESC
                 LIMIT 50
             """)
             rows = cursor.fetchall()
@@ -2015,7 +2463,7 @@ class DbRepository:
                     SELECT completed_at, started_at, error_message, stage_metrics_json, status
                     FROM pipeline_runs
                     WHERE status IN ('partial_failure', 'failed')
-                    ORDER BY created_at DESC, rowid DESC
+                    ORDER BY created_at DESC, run_id DESC
                     LIMIT 1
                 """)
                 f_row = cursor.fetchone()
@@ -2107,10 +2555,17 @@ class DbRepository:
         now = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR IGNORE INTO user_saved_stories (user_id, story_id, saved_at)
-                VALUES (?, ?, ?)
-            """, (user_id, story_id, now))
+            if self.is_postgres:
+                cursor.execute("""
+                    INSERT INTO user_saved_stories (user_id, story_id, saved_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                """, (user_id, story_id, now))
+            else:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_saved_stories (user_id, story_id, saved_at)
+                    VALUES (?, ?, ?)
+                """, (user_id, story_id, now))
             conn.commit()
             return cursor.rowcount > 0
 

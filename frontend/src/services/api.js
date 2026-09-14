@@ -140,16 +140,22 @@ export const ApiService = {
         };
       }
 
-      // Merge local saved and hidden states
+      // Handle both raw array and object with items
+      const rawItems = Array.isArray(data) ? data : (data.items || []);
       const savedIds = new Set(StorageService.getSavedStoryIds());
       const hiddenIds = new Set(StorageService.getHiddenStoryIds());
       
-      const filtered = (data.items || []).filter(s => !hiddenIds.has(s.id)).map(s => ({
+      const filtered = rawItems.filter(s => !hiddenIds.has(s.id)).map(s => ({
         ...s,
         is_saved: savedIds.has(s.id)
       }));
 
-      return { total: filtered.length, items: filtered, is_real_data: data.is_real_data };
+      return {
+        total: filtered.length,
+        items: filtered,
+        is_real_data: data.is_real_data,
+        is_empty: filtered.length === 0
+      };
     } catch (err) {
       // Fallback to local dataset only if backend unreachable
       const savedIds = new Set(StorageService.getSavedStoryIds());
@@ -348,15 +354,30 @@ export const ApiService = {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
+      if (data.is_empty) {
+        return {
+          total: 0,
+          items: [],
+          is_empty: true,
+          message: data.message
+        };
+      }
+
       const savedIds = new Set(StorageService.getSavedStoryIds());
       const hiddenIds = new Set(StorageService.getHiddenStoryIds());
 
-      const filtered = (data.items || []).filter(s => !hiddenIds.has(s.id)).map(s => ({
+      const rawItems = Array.isArray(data) ? data : (data.items || []);
+      const filtered = rawItems.filter(s => !hiddenIds.has(s.id)).map(s => ({
         ...s,
         is_saved: savedIds.has(s.id) || s.is_saved
       }));
 
-      return { total: filtered.length, items: filtered, is_real_data: true };
+      return {
+        total: filtered.length,
+        items: filtered,
+        is_real_data: true,
+        is_empty: filtered.length === 0
+      };
     } catch {
       // Fall back to standard stories
       return await ApiService.getStories({ limit });

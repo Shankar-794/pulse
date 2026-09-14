@@ -108,10 +108,12 @@ class FeedRankingService:
         self,
         user_id: str = "default_user",
         limit: int = 50,
-        offset: int = 0
+        offset: int = 0,
+        category: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Generates personalized, balanced feed ranking for the given user.
+        Operates strictly against the authoritative database repository.
         """
         # 1. Fetch user preferences and exclusions
         profile = db_repository.get_user_preferences(user_id)
@@ -120,12 +122,20 @@ class FeedRankingService:
         profile["saved_story_ids"] = list(saved_ids)
         profile["hidden_story_ids"] = list(hidden_ids)
 
-        # 2. Fetch candidate stories from repository
+        # 2. Fetch candidate stories from authoritative database repository
         fetch_limit = max(limit * 4, 100)
-        raw_stories = db_repository.get_stories(limit=fetch_limit)
+        raw_stories = db_repository.get_stories(category=category, limit=fetch_limit)
         if not raw_stories:
-            from backend.app.services.news_service import news_service
-            raw_stories = news_service.get_all_stories(limit=fetch_limit)
+            # Fallback to unclustered articles from DB if stories table is empty or unpopulated for this category
+            from backend.app.api.endpoints.stories import article_to_story
+            raw_articles = db_repository.get_articles(category=category, limit=fetch_limit)
+            if raw_articles:
+                raw_stories = [article_to_story(art) for art in raw_articles]
+            else:
+                raw_stories = []
+
+        if not raw_stories:
+            return []
 
         # 3. Filter and score candidates
         scored_candidates: List[Dict[str, Any]] = []

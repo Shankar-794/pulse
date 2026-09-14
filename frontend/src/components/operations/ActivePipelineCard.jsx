@@ -158,6 +158,8 @@ export default function ActivePipelineCard() {
 
   const isMountedRef = useRef(true);
   const inFlightRef = useRef(false);
+  const prevStatusRef = useRef(null);
+  const lastBroadcastRunIdRef = useRef(null);
 
   // Fetch status from API
   const fetchStatus = useCallback(async (isManual = false) => {
@@ -173,6 +175,24 @@ export default function ActivePipelineCard() {
       if (!isMountedRef.current) return;
 
       if (res && res.status !== 'error') {
+        const newRun = res.pipeline || res;
+        const newStatus = (res.status || newRun?.status || 'idle').toLowerCase();
+        const runId = newRun?.run_id;
+
+        // Invalidate/refresh feeds across all views when pipeline finishes
+        const wasActive = prevStatusRef.current === 'running' || prevStatusRef.current === 'queued';
+        if (
+          wasActive &&
+          (newStatus === 'success' || newStatus === 'partial_failure') &&
+          runId !== lastBroadcastRunIdRef.current
+        ) {
+          lastBroadcastRunIdRef.current = runId;
+          window.dispatchEvent(new CustomEvent('pulse_pipeline_completed', {
+            detail: { runId, status: newStatus }
+          }));
+        }
+        prevStatusRef.current = newStatus;
+
         setPipelineData(res);
         setErrorMessage(null);
       } else if (res?.error) {
@@ -248,6 +268,7 @@ export default function ActivePipelineCard() {
       if (!isMountedRef.current) return;
 
       if (res?.status === 'accepted') {
+        prevStatusRef.current = 'queued';
         setSuccessMessage(`Pipeline execution accepted (${res.run_id}). Live monitoring active.`);
         // Immediately refresh status to enter high-frequency tracking
         await fetchStatus(true);
