@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
+import { useAuth } from '../context/AuthContext';
+import { addPendingAction } from '../services/pendingActions';
 import NewsCard from '../components/feed/NewsCard';
 import ErrorState from '../components/common/ErrorState';
 import { Filter, Layers, RefreshCw } from 'lucide-react';
@@ -42,7 +44,8 @@ const CATEGORY_META = {
 };
 
 export default function CategoryFeedPage() {
-  const { category: paramCategory } = useParams();
+  const { isAuthenticated, openLoginModal } = useAuth();
+  const { category: paramCategory = 'technology' } = useParams();
   const location = useLocation();
   const pathSegment = location.pathname.replace(/^\/+|\/+$/g, '').split('/').pop();
   const rawKey = paramCategory || pathSegment || '';
@@ -101,9 +104,20 @@ export default function CategoryFeedPage() {
   }, [loadCategoryFeed]);
 
   const handleSaveToggle = async (storyId) => {
-    if (localStorage.getItem('pulse_auth_token')) {
+    if (!isAuthenticated) {
       const story = stories.find((s) => s.id === storyId);
-      const willSave = !story?.is_saved;
+      const actionType = story?.is_saved ? 'UNSAVE_STORY' : 'SAVE_STORY';
+      addPendingAction(actionType, { storyId });
+      openLoginModal({
+        title: 'Sign in to personalize Pulse',
+        message: 'Your action will be saved and completed after you sign in.'
+      });
+      return;
+    }
+
+    const story = stories.find((s) => s.id === storyId);
+    const willSave = !story?.is_saved;
+    try {
       if (willSave) {
         await ApiService.saveStory(storyId);
       } else {
@@ -112,12 +126,8 @@ export default function CategoryFeedPage() {
       setStories((prev) =>
         prev.map((s) => (s.id === storyId ? { ...s, is_saved: willSave } : s))
       );
-    } else {
-      const isSaved = StorageService.toggleSaveStory(storyId);
-      ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
-      setStories((prev) =>
-        prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
-      );
+    } catch (err) {
+      console.error('Failed to toggle save story:', err);
     }
   };
 

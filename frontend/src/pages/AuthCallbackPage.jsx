@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiService } from '../services/api';
+import { replayPendingActions } from '../services/pendingActions';
 import { ShieldCheck, AlertCircle, ArrowLeft } from 'lucide-react';
 
 export const AuthCallbackPage = () => {
@@ -13,45 +14,75 @@ export const AuthCallbackPage = () => {
     let isCancelled = false;
 
     const processAuth = async () => {
+      const token = searchParams.get('token');
       const code = searchParams.get('code');
       const error = searchParams.get('error');
 
       if (error) {
         if (!isCancelled) {
           setStatus('error');
-          setErrorMessage('Sign-in was cancelled or interrupted. Please try again.');
+          if (error === 'access_denied') {
+            setErrorMessage('Google sign-in was cancelled. Your pending actions have been preserved.');
+          } else {
+            setErrorMessage('Sign-in was interrupted. Please try again.');
+          }
         }
         return;
       }
 
-      if (!code) {
+      if (!token && !code) {
         if (!isCancelled) {
           setStatus('error');
-          setErrorMessage('Unable to complete sign-in. Please try again.');
+          setErrorMessage('Unable to complete sign-in. Missing authentication parameters.');
         }
         return;
       }
 
       try {
-        const redirectUri = window.location.origin + '/auth/callback';
-        const res = await ApiService.handleGoogleCallback(code, redirectUri);
-        
-        if (res && res.token) {
-          localStorage.setItem('pulse_auth_token', res.token);
-          if (res.user) {
-            localStorage.setItem('pulse_user_profile', JSON.stringify(res.user));
+        let sessionToken = token;
+        let user = null;
+
+        if (sessionToken) {
+          // Flow 1: Backend Google OAuth 302 redirect with session token
+          localStorage.setItem('pulse_auth_token', sessionToken);
+          try {
+            user = await ApiService.getCurrentUser();
+            if (user) {
+              localStorage.setItem('pulse_user_profile', JSON.stringify(user));
+            }
+          } catch (err) {
+            console.warn('Could not fetch user immediately:', err);
           }
-          if (!isCancelled) {
-            setStatus('success');
-            const targetPath = sessionStorage.getItem('pulse_auth_redirect') || '/';
-            sessionStorage.removeItem('pulse_auth_redirect');
-            // Allow token to propagate, then navigate
-            setTimeout(() => {
-              window.location.href = targetPath;
-            }, 300);
+        } else if (code) {
+          // Flow 2: Frontend authorization code exchange fallback
+          const redirectUri = window.location.origin + '/auth/callback';
+          const res = await ApiService.handleGoogleCallback(code, redirectUri);
+          if (res && res.token) {
+            sessionToken = res.token;
+            user = res.user;
+            localStorage.setItem('pulse_auth_token', sessionToken);
+            if (user) {
+              localStorage.setItem('pulse_user_profile', JSON.stringify(user));
+            }
+          } else {
+            throw new Error('No authentication token returned by server');
           }
-        } else {
-          throw new Error('No authentication token returned by server');
+        }
+
+        // Replay all pending guest actions idempotently
+        try {
+          await replayPendingActions(ApiService);
+        } catch (replayErr) {
+          console.warn('[AuthCallback] Pending actions replay error:', replayErr);
+        }
+
+        if (!isCancelled) {
+          setStatus('success');
+          const targetPath = sessionStorage.getItem('pulse_auth_redirect') || '/';
+          sessionStorage.removeItem('pulse_auth_redirect');
+          setTimeout(() => {
+            window.location.href = targetPath;
+          }, 300);
         }
       } catch {
         if (!isCancelled) {

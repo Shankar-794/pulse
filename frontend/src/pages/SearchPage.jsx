@@ -3,6 +3,8 @@ import { useSearchParams } from 'react-router-dom';
 import { Search, X, Layers } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
+import { useAuth } from '../context/AuthContext';
+import { addPendingAction } from '../services/pendingActions';
 import NewsCard from '../components/feed/NewsCard';
 
 const CATEGORIES = ['All', 'AI', 'Technology', 'Cybersecurity', 'Space', 'Science', 'Business', 'Economy', 'World'];
@@ -15,6 +17,7 @@ const DATE_RANGES = [
 ];
 
 export default function SearchPage() {
+  const { isAuthenticated, openLoginModal } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialQuery = searchParams.get('q') || '';
 
@@ -77,9 +80,20 @@ export default function SearchPage() {
   }, [query, selectedCategory, selectedSource, selectedDateRange]);
 
   const handleSaveToggle = async (storyId) => {
-    if (localStorage.getItem('pulse_auth_token')) {
+    if (!isAuthenticated) {
       const story = results.find((s) => s.id === storyId);
-      const willSave = !story?.is_saved;
+      const actionType = story?.is_saved ? 'UNSAVE_STORY' : 'SAVE_STORY';
+      addPendingAction(actionType, { storyId });
+      openLoginModal({
+        title: 'Sign in to personalize Pulse',
+        message: 'Your action will be saved and completed after you sign in.'
+      });
+      return;
+    }
+
+    const story = results.find((s) => s.id === storyId);
+    const willSave = !story?.is_saved;
+    try {
       if (willSave) {
         await ApiService.saveStory(storyId);
       } else {
@@ -88,12 +102,8 @@ export default function SearchPage() {
       setResults((prev) =>
         prev.map((s) => (s.id === storyId ? { ...s, is_saved: willSave } : s))
       );
-    } else {
-      const isSaved = StorageService.toggleSaveStory(storyId);
-      ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
-      setResults((prev) =>
-        prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
-      );
+    } catch (err) {
+      console.error('Failed to toggle save story in search:', err);
     }
   };
 

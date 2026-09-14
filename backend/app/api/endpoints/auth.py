@@ -3,9 +3,10 @@ Authentication Endpoints for Pulse.
 Supports Google OAuth 2.0 / OpenID Connect and developer authentication.
 """
 from typing import Optional, Dict, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 import httpx
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, Query, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from backend.app.core.config import settings
@@ -78,11 +79,11 @@ async def get_google_auth_url(redirect_uri: Optional[str] = None) -> Dict[str, s
     }
 
 
-@router.post("/google/callback")
-async def handle_google_callback(payload: GoogleCallbackRequest) -> Dict[str, Any]:
+async def _process_google_code(code: str, redirect_uri: Optional[str] = None) -> Dict[str, Any]:
     """
-    Exchanges an authorization code for tokens, retrieves profile,
-    and returns a signed session token with the authenticated user.
+    Core token exchange and user provisioning logic.
+    Exchanges code with Google, retrieves userinfo, upserts user,
+    and returns session token + user profile.
     """
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
         raise HTTPException(
@@ -90,12 +91,12 @@ async def handle_google_callback(payload: GoogleCallbackRequest) -> Dict[str, An
             detail="Google OAuth is not configured on this server."
         )
 
-    effective_redirect_uri = payload.redirect_uri or settings.GOOGLE_REDIRECT_URI
+    effective_redirect_uri = redirect_uri or settings.GOOGLE_REDIRECT_URI
 
     # 1. Exchange authorization code for Google access token
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
-        "code": payload.code,
+        "code": code,
         "client_id": settings.GOOGLE_CLIENT_ID,
         "client_secret": settings.GOOGLE_CLIENT_SECRET,
         "redirect_uri": effective_redirect_uri,
@@ -153,7 +154,7 @@ async def handle_google_callback(payload: GoogleCallbackRequest) -> Dict[str, An
             detail="Google account did not return an email address"
         )
 
-    # 3. Upsert user in database
+    # 3. Upsert user in database (handles duplicate protection & returning user lookup)
     user = db_repository.upsert_user(
         email=email,
         full_name=userinfo.get("name") or email.split("@")[0].title(),
@@ -173,6 +174,61 @@ async def handle_google_callback(payload: GoogleCallbackRequest) -> Dict[str, An
         "token": session_token,
         "user": user
     }
+
+
+@router.get("/google/callback")
+async def handle_google_callback_redirect(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None)
+):
+    """
+    HTTP GET endpoint for direct Google OAuth redirect.
+    Validates OAuth response, creates/retrieves user, creates session token,
+    and 302 redirects back to the configured frontend application.
+    """
+    frontend_base = getattr(settings, "FRONTEND_URL", "https://pulse-drab-eight.vercel.app").rstrip("/")
+    target_callback = f"{frontend_base}/auth/callback"
+
+    if error:
+        return RedirectResponse(
+            url=f"{target_callback}?error={quote(error)}",
+            status_code=status.HTTP_302_FOUND
+        )
+
+    if not code:
+        return RedirectResponse(
+            url=f"{target_callback}?error=missing_code",
+            status_code=status.HTTP_302_FOUND
+        )
+
+    try:
+        res = await _process_google_code(code, redirect_uri=settings.GOOGLE_REDIRECT_URI)
+        token = res["token"]
+        return RedirectResponse(
+            url=f"{target_callback}?token={quote(token)}",
+            status_code=status.HTTP_302_FOUND
+        )
+    except HTTPException as he:
+        err_msg = str(he.detail) if isinstance(he.detail, str) else "auth_failed"
+        return RedirectResponse(
+            url=f"{target_callback}?error={quote(err_msg)}",
+            status_code=status.HTTP_302_FOUND
+        )
+    except Exception:
+        return RedirectResponse(
+            url=f"{target_callback}?error=internal_auth_error",
+            status_code=status.HTTP_302_FOUND
+        )
+
+
+@router.post("/google/callback")
+async def handle_google_callback(payload: GoogleCallbackRequest) -> Dict[str, Any]:
+    """
+    Exchanges an authorization code for tokens, retrieves profile,
+    and returns a signed session token with the authenticated user.
+    """
+    return await _process_google_code(payload.code, payload.redirect_uri)
 
 
 @router.post("/dev-login")

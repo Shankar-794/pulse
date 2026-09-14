@@ -222,3 +222,93 @@ def test_business_and_economy_categories():
     econ_data = res_econ.json()
     assert "total" in econ_data
     assert "items" in econ_data
+
+
+def test_google_oauth_callback_cancellation():
+    """Verifies that OAuth cancellation or error query parameters 302 redirect to frontend with error."""
+    res = client.get("/api/auth/google/callback?error=access_denied", follow_redirects=False)
+    assert res.status_code == 302
+    assert "error=access_denied" in res.headers["location"]
+    assert "/auth/callback" in res.headers["location"]
+
+
+def test_google_oauth_callback_missing_code():
+    """Verifies that missing code 302 redirects to frontend with missing_code."""
+    res = client.get("/api/auth/google/callback", follow_redirects=False)
+    assert res.status_code == 302
+    assert "error=missing_code" in res.headers["location"]
+
+
+def test_google_oauth_full_flow_and_returning_user():
+    """Verifies Google OAuth GET callback creates user and subsequent login returns same user without duplicates."""
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from backend.app.core.config import settings
+    from backend.app.core.db_repository import db_repository
+
+    orig_client_id = settings.GOOGLE_CLIENT_ID
+    orig_client_secret = settings.GOOGLE_CLIENT_SECRET
+    settings.GOOGLE_CLIENT_ID = "mock_client_id"
+    settings.GOOGLE_CLIENT_SECRET = "mock_client_secret"
+
+    try:
+        mock_token_resp = httpx.Response(200, json={"access_token": "ya29.mock_token_123"}, request=httpx.Request("POST", "https://oauth2.googleapis.com/token"))
+        mock_userinfo_resp = httpx.Response(200, json={
+            "sub": "google_sub_999888",
+            "email": "sarah.connor@cyberdyne.org",
+            "name": "Sarah Connor",
+            "picture": "https://lh3.googleusercontent.com/sarah.jpg"
+        }, request=httpx.Request("GET", "https://www.googleapis.com/oauth2/v3/userinfo"))
+
+        with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=mock_token_resp), \
+             patch.object(httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_userinfo_resp):
+            # First login: creates new user
+            res = client.get("/api/auth/google/callback?code=mock_auth_code_1", follow_redirects=False)
+            assert res.status_code == 302
+            loc = res.headers["location"]
+            assert "token=" in loc
+            assert "/auth/callback" in loc
+
+            # Verify user exists in database
+            user1 = db_repository.get_user_by_email("sarah.connor@cyberdyne.org")
+            assert user1 is not None
+            assert user1["full_name"] == "Sarah Connor"
+            assert user1["oauth_sub"] == "google_sub_999888"
+
+            # Second login: returning user
+            res2 = client.get("/api/auth/google/callback?code=mock_auth_code_2", follow_redirects=False)
+            assert res2.status_code == 302
+            loc2 = res2.headers["location"]
+            assert "token=" in loc2
+
+            # Verify no duplicate user was created
+            user2 = db_repository.get_user_by_email("sarah.connor@cyberdyne.org")
+            assert user2 is not None
+            assert user2["id"] == user1["id"]
+    finally:
+        settings.GOOGLE_CLIENT_ID = orig_client_id
+        settings.GOOGLE_CLIENT_SECRET = orig_client_secret
+
+
+def test_anonymous_read_only_access():
+    """Verifies that anonymous users can read feed, categories, and system health without auth."""
+    res_health = client.get("/api/health")
+    assert res_health.status_code == 200
+
+    res_feed = client.get("/api/feed?limit=5")
+    assert res_feed.status_code == 200
+
+    res_stories = client.get("/api/stories?limit=5")
+    assert res_stories.status_code == 200
+
+    res_cfg = client.get("/api/auth/config")
+    assert res_cfg.status_code == 200
+    assert "google_configured" in res_cfg.json()
+
+
+def test_protected_endpoints_require_auth():
+    """Verifies that personalized write actions reject unauthenticated requests with HTTP 401."""
+    # Attempting to save a story without token
+    res = client.post("/api/stories/test_story_123/save")
+    assert res.status_code == 401
+

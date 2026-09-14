@@ -2,11 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { Flame, Sparkles, Cpu, Globe, Layers, RefreshCw, CheckCircle2, Newspaper } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
+import { useAuth } from '../context/AuthContext';
+import { addPendingAction } from '../services/pendingActions';
 import NewsCard from '../components/feed/NewsCard';
 import FeedSection from '../components/feed/FeedSection';
 import ErrorState from '../components/common/ErrorState';
 
 export default function ForYouPage() {
+  const { isAuthenticated, openLoginModal } = useAuth();
   const [stories, setStories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -63,9 +66,20 @@ export default function ForYouPage() {
   }, []);
 
   const handleSaveToggle = async (storyId) => {
-    if (localStorage.getItem('pulse_auth_token')) {
+    if (!isAuthenticated) {
       const story = stories.find((s) => s.id === storyId);
-      const willSave = !story?.is_saved;
+      const actionType = story?.is_saved ? 'UNSAVE_STORY' : 'SAVE_STORY';
+      addPendingAction(actionType, { storyId });
+      openLoginModal({
+        title: 'Sign in to personalize Pulse',
+        message: 'Your action will be saved and completed after you sign in.'
+      });
+      return;
+    }
+
+    const story = stories.find((s) => s.id === storyId);
+    const willSave = !story?.is_saved;
+    try {
       if (willSave) {
         await ApiService.saveStory(storyId);
       } else {
@@ -74,12 +88,8 @@ export default function ForYouPage() {
       setStories((prev) =>
         prev.map((s) => (s.id === storyId ? { ...s, is_saved: willSave } : s))
       );
-    } else {
-      const isSaved = StorageService.toggleSaveStory(storyId);
-      ApiService.recordInteraction(storyId, isSaved ? 'save' : 'unsave');
-      setStories((prev) =>
-        prev.map((s) => (s.id === storyId ? { ...s, is_saved: isSaved } : s))
-      );
+    } catch (err) {
+      console.error('Failed to toggle save story:', err);
     }
   };
 

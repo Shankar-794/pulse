@@ -6,6 +6,7 @@ export const LoginModal = () => {
   const {
     isLoginModalOpen,
     closeLoginModal,
+    loginModalOptions,
     authConfig,
     loginWithGoogle,
     devLogin,
@@ -19,6 +20,9 @@ export const LoginModal = () => {
   const isDevAuthAvailable = !import.meta.env.PROD && !!authConfig?.dev_login_enabled;
 
   if (!isLoginModalOpen) return null;
+
+  const modalTitle = loginModalOptions?.title || 'Sign in to Pulse';
+  const modalMessage = loginModalOptions?.message || 'Your personalized news intelligence, saved stories, and recommendations — all in one place.';
 
   const handleGoogleSignIn = async () => {
     try {
@@ -74,10 +78,10 @@ export const LoginModal = () => {
             <Newspaper className="w-6 h-6" />
           </div>
           <h2 id="auth-modal-title" className="text-xl sm:text-2xl font-bold font-sans text-news-text-primary tracking-tight">
-            Sign in to Pulse
+            {modalTitle}
           </h2>
           <p className="text-sm text-news-text-secondary mt-2 leading-relaxed">
-            Your personalized news intelligence, saved stories, and recommendations — all in one place.
+            {modalMessage}
           </p>
         </div>
 

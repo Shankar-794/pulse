@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   Bookmark,
@@ -11,15 +11,14 @@ import {
   ShieldCheck,
   CheckCircle2,
   Tag,
-  RefreshCw,
   Building2,
   AlertCircle,
   TrendingUp,
-  Scale,
-  GitCommit
+  Scale
 } from 'lucide-react';
 import { ApiService } from '../services/api';
-import { StorageService } from '../services/storage';
+import { useAuth } from '../context/AuthContext';
+import { addPendingAction } from '../services/pendingActions';
 import CategoryBadge from '../components/common/CategoryBadge';
 import ImportanceBadge from '../components/common/ImportanceBadge';
 import SourceBadge from '../components/common/SourceBadge';
@@ -59,6 +58,7 @@ function formatTimelineDate(dateStr) {
 }
 
 export default function StoryDetailPage() {
+  const { isAuthenticated, openLoginModal } = useAuth();
   const { id } = useParams();
   const navigate = useNavigate();
 
@@ -98,18 +98,26 @@ export default function StoryDetailPage() {
 
   const handleSaveToggle = async () => {
     if (!story) return;
-    if (localStorage.getItem('pulse_auth_token')) {
-      const willSave = !story.is_saved;
+    if (!isAuthenticated) {
+      const actionType = story.is_saved ? 'UNSAVE_STORY' : 'SAVE_STORY';
+      addPendingAction(actionType, { storyId: story.id });
+      openLoginModal({
+        title: 'Sign in to personalize Pulse',
+        message: 'Your action will be saved and completed after you sign in.'
+      });
+      return;
+    }
+
+    const willSave = !story.is_saved;
+    try {
       if (willSave) {
         await ApiService.saveStory(story.id);
       } else {
         await ApiService.unsaveStory(story.id);
       }
       setStory((prev) => ({ ...prev, is_saved: willSave }));
-    } else {
-      const isSaved = StorageService.toggleSaveStory(story.id);
-      setStory((prev) => ({ ...prev, is_saved: isSaved }));
-      ApiService.recordInteraction(story.id, isSaved ? 'save' : 'unsave');
+    } catch (err) {
+      console.error('Failed to toggle save story:', err);
     }
   };
 

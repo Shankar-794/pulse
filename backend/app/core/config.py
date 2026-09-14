@@ -258,8 +258,10 @@ try:
 
         # Authentication & Google OAuth Configuration
         GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
-        _default_redirect = "https://pulse-drab-eight.vercel.app/auth/callback" if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:5173/auth/callback"
+        GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
+        _default_redirect = "https://pulse-363y.onrender.com/api/auth/google/callback" if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:8000/api/auth/google/callback"
         GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", _default_redirect)
+        FRONTEND_URL: str = os.getenv("FRONTEND_URL", PRODUCTION_FRONTEND_ORIGIN if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:5173")
         AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "pulse-production-session-secret-key-replace-in-env-at-launch")
         AUTH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("AUTH_TOKEN_EXPIRE_DAYS", "7"))
 
@@ -435,8 +437,10 @@ except Exception:
 
         # Authentication & Google OAuth Configuration
         GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
-        _default_redirect = "https://pulse-drab-eight.vercel.app/auth/callback" if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:5173/auth/callback"
+        GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
+        _default_redirect = "https://pulse-363y.onrender.com/api/auth/google/callback" if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:8000/api/auth/google/callback"
         GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", _default_redirect)
+        FRONTEND_URL: str = os.getenv("FRONTEND_URL", PRODUCTION_FRONTEND_ORIGIN if os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod") else "http://localhost:5173")
         AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "pulse-production-session-secret-key-replace-in-env-at-launch")
         AUTH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("AUTH_TOKEN_EXPIRE_DAYS", "7"))
 

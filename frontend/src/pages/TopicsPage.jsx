@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Hash, Search } from 'lucide-react';
 import { ApiService } from '../services/api';
+import { useAuth } from '../context/AuthContext';
+import { addPendingAction } from '../services/pendingActions';
 import TopicCard from '../components/topics/TopicCard';
 
 export default function TopicsPage() {
+  const { isAuthenticated, openLoginModal } = useAuth();
   const [topics, setTopics] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterQuery, setFilterQuery] = useState('');
@@ -30,10 +33,23 @@ export default function TopicsPage() {
   }, []);
 
   const handleToggleFollow = async (topicId, isFollowed) => {
-    await ApiService.toggleTopicFollow(topicId, isFollowed);
-    setTopics((prev) =>
-      prev.map((t) => (t.id === topicId ? { ...t, is_followed: isFollowed } : t))
-    );
+    if (!isAuthenticated) {
+      addPendingAction('FOLLOW_TOPIC', { topicId, isFollowed });
+      openLoginModal({
+        title: 'Sign in to personalize Pulse',
+        message: 'Your action will be saved and completed after you sign in.'
+      });
+      return;
+    }
+
+    try {
+      await ApiService.toggleTopicFollow(topicId, isFollowed);
+      setTopics((prev) =>
+        prev.map((t) => (t.id === topicId ? { ...t, is_followed: isFollowed } : t))
+      );
+    } catch (err) {
+      console.error('Failed to toggle topic follow:', err);
+    }
   };
 
   const filteredTopics = topics.filter((t) => {

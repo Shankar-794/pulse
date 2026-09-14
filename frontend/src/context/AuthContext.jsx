@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { ApiService } from '../services/api';
 import { StorageService } from '../services/storage';
+import { replayPendingActions } from '../services/pendingActions';
 
 const AuthContext = createContext(null);
 
@@ -11,6 +12,7 @@ export const AuthProvider = ({ children }) => {
   const [authConfig, setAuthConfig] = useState({ google_configured: false, client_id: '', redirect_uri: '', dev_login_enabled: false });
   const [savedCount, setSavedCount] = useState(0);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [loginModalOptions, setLoginModalOptions] = useState({ title: '', message: '' });
 
   // Fetch public auth config on mount
   useEffect(() => {
@@ -41,6 +43,26 @@ export const AuthProvider = ({ children }) => {
         setSavedCount(localIds.length);
       }
     }
+  }, []);
+
+  // Refresh current user profile
+  const refreshUser = useCallback(async () => {
+    const savedToken = localStorage.getItem('pulse_auth_token');
+    if (!savedToken) {
+      setUser(null);
+      return null;
+    }
+    try {
+      const currentUser = await ApiService.getCurrentUser();
+      if (currentUser) {
+        setUser(currentUser);
+        localStorage.setItem('pulse_user_profile', JSON.stringify(currentUser));
+        return currentUser;
+      }
+    } catch (err) {
+      console.error('Failed to refresh user:', err);
+    }
+    return null;
   }, []);
 
   // Check current session on mount or token change
@@ -120,6 +142,8 @@ export const AuthProvider = ({ children }) => {
         setUser(res.user);
         localStorage.setItem('pulse_user_profile', JSON.stringify(res.user));
         setIsLoginModalOpen(false);
+        // Replay any pending guest actions idempotently
+        await replayPendingActions(ApiService);
         await refreshSavedCount();
         return res.user;
       }
@@ -143,8 +167,14 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const openLoginModal = () => setIsLoginModalOpen(true);
-  const closeLoginModal = () => setIsLoginModalOpen(false);
+  const openLoginModal = (options = {}) => {
+    setLoginModalOptions(options || {});
+    setIsLoginModalOpen(true);
+  };
+  const closeLoginModal = () => {
+    setIsLoginModalOpen(false);
+    setLoginModalOptions({ title: '', message: '' });
+  };
 
   return (
     <AuthContext.Provider
@@ -156,10 +186,12 @@ export const AuthProvider = ({ children }) => {
         authConfig,
         savedCount,
         refreshSavedCount,
+        refreshUser,
         loginWithGoogle,
         devLogin,
         logout,
         isLoginModalOpen,
+        loginModalOptions,
         openLoginModal,
         closeLoginModal,
       }}
